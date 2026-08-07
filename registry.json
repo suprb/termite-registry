@@ -762,30 +762,30 @@
       "id": "dev.termite.chromium",
       "name": "Browser",
       "description": "real Chromium as a docked sidecar + agent browser API (MCP)",
-      "author": "termite",
+      "author": "CMDY",
       "license": "MIT",
-      "version": "1.0.1",
-      "url": "https://github.com/andreas-pihlstrom/termite-registry/releases/download/chromium-1.0.1/chromium.zip",
-      "sha256": "1f410d7b607022f3397e6ac74d2dab57392329d8d182471d56e44e570b097e09",
+      "version": "1.1.0",
+      "url": "https://github.com/andreas-pihlstrom/termite-registry/releases/download/chromium-1.1.0/chromium.zip",
+      "sha256": "1bd223831362a30bd005d06d3611dab4d46510d395eba14120e97745a3e5b351",
       "sdk": "v1",
       "arch": [
         "arm64"
       ],
       "payload": {
-        "url": "https://github.com/andreas-pihlstrom/termite-registry/releases/download/chromium-1.0.1/cef-frameworks.zip",
-        "sha256": "8dc69fa47142afdd8e35de990fe38f6c7d9b10b2f8a65f16f22b213b117dcdc3"
+        "url": "https://github.com/andreas-pihlstrom/termite-registry/releases/download/chromium-1.1.0/cef-frameworks.zip",
+        "sha256": "3ac77a11c19c59c4fb453d8f13c86e606ebb5c3adc8f7ec9c25ff2b17b010897"
       }
     },
     {
       "kind": "plugin",
       "id": "dev.termite.sim",
       "name": "Sim",
-      "description": "the iOS Simulator as a termite split \u2014 build/run/screenshot your Swift app, agent-driven",
-      "author": "termite",
+      "description": "the iOS Simulator as a CMDY split \u2014 build/run/screenshot your Swift app, agent-driven",
+      "author": "CMDY",
       "license": "MIT",
-      "version": "1.1.0",
-      "file": "dist/sim-1.1.0.zip",
-      "sha256": "d45e0f6389767b2e0b8311aac39328da4897222eb2ece881e320cec4ac78280c",
+      "version": "1.2.0",
+      "file": "dist/sim-1.2.0.zip",
+      "sha256": "53291890a09123683b304b24936110ceaf60a9c0a92fce7cc58edc7b47c426f9",
       "sdk": "v1",
       "arch": [
         "arm64"
