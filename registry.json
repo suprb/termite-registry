@@ -747,11 +747,11 @@
       "id": "dev.termite.bridge",
       "name": "Bridge",
       "description": "bind agent sessions to panes from the menu bar",
-      "author": "termite",
+      "author": "CMDY",
       "license": "MIT",
-      "version": "1.2.0",
-      "file": "dist/bridge-1.2.0.zip",
-      "sha256": "6b2b1333c3be435e2a7546798f1e871f4b8901208b0eb81e7a6ca9a7362c2915",
+      "version": "1.3.0",
+      "file": "dist/bridge-1.3.0.zip",
+      "sha256": "7ba03f5ca1cbdd5ac6506d08c76bcbbadbc244c443d9b54c20b40c6e37393d47",
       "sdk": "v1",
       "arch": [
         "arm64"
