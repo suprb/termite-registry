@@ -15,12 +15,15 @@ HASH2 = "2" * 40
 
 class FakeAPI:
     def __init__(self):
-        self.items = []
+        self.items, self.health = [], []
 
     def request(self, path, body=None):
         if body:
             self.items.append(body)
         return {}
+
+    def report_health(self, status, **fields):
+        self.health.append((status, fields))
 
 
 class FakeSource:
@@ -63,6 +66,7 @@ class GitWatchTests(unittest.TestCase):
         submitted = connector.poll_once()
         self.assertEqual([item["id"] for item in submitted], ["commit-" + HASH2])
         self.assertEqual(len(api.items), 1)
+        self.assertEqual([value[0] for value in api.health], ["healthy", "healthy"])
 
     def test_manifest_has_no_reply_event_capability(self):
         import json

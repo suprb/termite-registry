@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from html import unescape
 from html.parser import HTMLParser
 import hashlib
@@ -22,10 +23,43 @@ import urllib.request
 PLUGIN_DIR = Path(__file__).resolve().parent
 CHANNEL_ID = "dev.termite.mastodon.mentions"
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+_last_success_at: str | None = None
+_last_error_at: str | None = None
 
 
 def bounded(value: Any, limit: int) -> str:
     return str(value).encode("utf-8")[:limit].decode("utf-8", "ignore")
+
+
+def delivery_uncertain(exc: Exception) -> bool:
+    return not isinstance(exc, urllib.error.HTTPError) and isinstance(
+        exc, (urllib.error.URLError, TimeoutError, OSError)
+    )
+
+
+def report_health(client: Any, status: str, *, error: str = "",
+                  retry_in: int | None = None, detail: str = "") -> None:
+    global _last_success_at, _last_error_at
+    now = datetime.now(timezone.utc)
+    if status == "healthy":
+        _last_success_at = now.isoformat().replace("+00:00", "Z")
+    if error:
+        _last_error_at = now.isoformat().replace("+00:00", "Z")
+    body: dict[str, Any] = {"status": status}
+    if _last_success_at:
+        body["lastSuccessAt"] = _last_success_at
+    if _last_error_at:
+        body["lastErrorAt"] = _last_error_at
+    if error:
+        body["error"] = bounded(error, 1024)
+    if retry_in is not None:
+        body["nextRetryAt"] = (now + timedelta(seconds=max(0, retry_in))).isoformat().replace("+00:00", "Z")
+    if detail:
+        body["detail"] = bounded(detail, 2048)
+    try:
+        client.request(f"/v1/channels/{CHANNEL_ID}/health", body)
+    except Exception as exc:
+        print(f"health update failed: {type(exc).__name__}", file=sys.stderr, flush=True)
 
 
 def origin(url: str) -> tuple[str, str, int | None]:
@@ -207,9 +241,8 @@ class MastodonAPI:
         request = urllib.request.Request(self.cfg["base_url"] + "/api/v1/statuses",
                                          data=data, headers=headers, method="POST")
         with HTTP.open(request, timeout=30) as response:
-            raw = response.read(MAX_RESPONSE_BYTES + 1)
-        if len(raw) > MAX_RESPONSE_BYTES:
-            raise ValueError("Mastodon reply response exceeds 2 MiB")
+            # A 2xx response establishes acceptance; its body is not required.
+            response.read(MAX_RESPONSE_BYTES + 1)
 
 
 def work_item(notification: dict[str, Any], own_account_id: str = "",
@@ -259,13 +292,22 @@ def save_since_id(path: str, since_id: str) -> None:
 
 
 def deliver(client: TermiteClient, api: MastodonAPI, reply: dict[str, Any]) -> None:
+    client.request(f"/v1/channel-replies/{reply['id']}/attempt", {})
     try:
         api.reply(reply)
     except Exception as exc:
-        client.request(f"/v1/channel-replies/{reply['id']}/ack", {
-            "delivered": False, "error": f"Mastodon delivery failed: {exc}"[:512]
-        })
+        message = bounded(f"Mastodon delivery failed: {exc}", 512)
+        report_health(client, "degraded", error=message, detail="Mastodon reply failed")
+        if delivery_uncertain(exc):
+            client.request(f"/v1/channel-replies/{reply['id']}/ack", {
+                "state": "verification-needed", "error": message
+            })
+        else:
+            client.request(f"/v1/channel-replies/{reply['id']}/ack", {
+                "delivered": False, "error": message
+            })
         return
+    report_health(client, "healthy", detail="Mastodon reply accepted")
     client.request(f"/v1/channel-replies/{reply['id']}/ack", {"delivered": True})
 
 
@@ -304,6 +346,7 @@ def main() -> None:
         "account": cfg["account"], "description": "Mentions in; approved replies out",
         "replyCapabilities": ["reply"],
     })
+    report_health(client, "healthy", detail="Mastodon credentials verified")
     for pending in registration.get("pendingReplies", []):
         deliver(client, api, pending)
     threading.Thread(target=reply_loop, args=(client, api), daemon=True).start()
@@ -326,9 +369,12 @@ def main() -> None:
                 save_since_id(cfg["state_file"], since_id)
             failures = 0
             delay = cfg["poll_seconds"]
+            report_health(client, "healthy", detail="Mastodon notifications poll succeeded")
         except Exception as exc:
             failures += 1
             delay = min(cfg["poll_seconds"] * (2 ** min(failures, 5)), 3600)
+            report_health(client, "retrying", error=f"Mastodon poll failed: {exc}",
+                          retry_in=delay, detail="Mastodon notifications poll will retry")
             print(f"Mastodon poll failed: {exc}; retrying in {delay}s", file=sys.stderr, flush=True)
 
 

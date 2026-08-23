@@ -2,6 +2,7 @@
 """Clipboard Inbox: explicit, bounded macOS clipboard polling."""
 
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
@@ -29,6 +30,11 @@ def as_bool(value):
 
 def utf8_prefix(value, max_bytes):
     return str(value).encode("utf-8")[:max_bytes].decode("utf-8", "ignore")
+
+
+def iso_now(offset_seconds=0):
+    value = datetime.now(timezone.utc) + timedelta(seconds=max(0, offset_seconds))
+    return value.isoformat().replace("+00:00", "Z")
 
 
 def load_config(path=CONFIG_PATH, environ=None):
@@ -167,6 +173,27 @@ class TermiteAPI:
         rid = urllib.parse.quote(str(reply_id), safe="")
         return self.request(f"/v1/channel-replies/{rid}/ack", body)
 
+    def begin_attempt(self, reply_id):
+        rid = urllib.parse.quote(str(reply_id), safe="")
+        return self.request(f"/v1/channel-replies/{rid}/attempt", {})
+
+    def verification_needed(self, reply_id, error):
+        rid = urllib.parse.quote(str(reply_id), safe="")
+        return self.request(f"/v1/channel-replies/{rid}/ack", {
+            "state": "verification-needed", "error": utf8_prefix(error, 1024),
+        })
+
+    def report_health(self, status, detail="", error="", retry_in=None):
+        body = {"status": status, "detail": utf8_prefix(detail, 4096)}
+        if status == "healthy":
+            body["lastSuccessAt"] = iso_now()
+        if error:
+            body["error"] = utf8_prefix(error, 4096)
+            body["lastErrorAt"] = iso_now()
+        if retry_in is not None:
+            body["nextRetryAt"] = iso_now(retry_in)
+        return self.request(f"/v1/channels/{CHANNEL_ID}/health", body)
+
     def events(self):
         req = urllib.request.Request(self.base + "/v1/events", headers=self.headers)
         return urllib.request.urlopen(req, timeout=65)
@@ -180,6 +207,12 @@ class Connector:
         self.initialized = False
         self.write_generation = 0
         self.lock = threading.Lock()
+
+    def health(self, status, **fields):
+        try:
+            self.api.report_health(status, **fields)
+        except Exception as exc:
+            print(f"Clipboard health update failed: {exc}", flush=True)
 
     def poll_once(self):
         with self.lock:
@@ -206,11 +239,13 @@ class Connector:
             if generation == self.write_generation:
                 self.last_digest = digest
             self.initialized = True
+        self.health("healthy", detail="Clipboard poll completed")
         return item
 
     def deliver(self, reply):
         if reply.get("channel") not in (None, CHANNEL_ID):
             return
+        self.api.begin_attempt(reply["id"])
         try:
             digest = self.clipboard_writer(str(reply.get("body", "")))
             with self.lock:
@@ -218,8 +253,12 @@ class Connector:
                 self.last_digest, self.initialized = digest, True
                 self.write_generation += 1
         except Exception as exc:
-            self.api.ack(reply["id"], False, f"pbcopy failed: {exc}")
+            message = f"clipboard write is ambiguous: {exc}"
+            self.health("degraded", error=message,
+                        detail="Clipboard delivery needs user verification")
+            self.api.verification_needed(reply["id"], message)
         else:
+            self.health("healthy", detail="Approved reply was written to the clipboard")
             self.api.ack(reply["id"], True)
 
     def recover(self):
@@ -245,6 +284,8 @@ class Connector:
                                 self.deliver(event)
             except Exception as exc:
                 print(f"Clipboard reply stream: {exc}; retrying in {delay:g}s", flush=True)
+                self.health("retrying", error=str(exc), retry_in=delay,
+                            detail="Clipboard reply stream disconnected")
                 time.sleep(delay)
                 delay = min(delay * 2, 30.0)
 
@@ -280,6 +321,8 @@ def main():
             delay = config["pollIntervalSeconds"]
         except Exception as exc:
             print(f"Clipboard poll: {exc}; retrying in {delay:g}s", flush=True)
+            connector.health("retrying", error=str(exc), retry_in=delay,
+                             detail="Clipboard poll failed")
             delay = min(delay * 2, 30.0)
         time.sleep(delay)
 

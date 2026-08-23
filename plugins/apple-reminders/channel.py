@@ -3,6 +3,7 @@
 
 from collections import deque
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
@@ -76,6 +77,11 @@ def as_bool(value):
 
 def utf8_prefix(value, max_bytes):
     return str(value).encode("utf-8")[:max_bytes].decode("utf-8", "ignore")
+
+
+def iso_now(offset_seconds=0):
+    value = datetime.now(timezone.utc) + timedelta(seconds=max(0, offset_seconds))
+    return value.isoformat().replace("+00:00", "Z")
 
 
 def string_list(value, name):
@@ -246,11 +252,28 @@ class TermiteAPI:
             raise ValueError("Termite response exceeds 1 MiB")
         return json.loads(raw) if raw else {}
 
+    def report_health(self, status, detail="", error="", retry_in=None):
+        body = {"status": status, "detail": utf8_prefix(detail, 4096)}
+        if status == "healthy":
+            body["lastSuccessAt"] = iso_now()
+        if error:
+            body["error"] = utf8_prefix(error, 4096)
+            body["lastErrorAt"] = iso_now()
+        if retry_in is not None:
+            body["nextRetryAt"] = iso_now(retry_in)
+        return self.request(f"/v1/channels/{CHANNEL_ID}/health", body)
+
 
 class Connector:
     def __init__(self, api, source, config):
         self.api, self.source, self.config = api, source, config
         self.seen, self.order, self.offset = set(), deque(), 0
+
+    def health(self, status, **fields):
+        try:
+            self.api.report_health(status, **fields)
+        except Exception as exc:
+            print(f"Apple Reminders health update failed: {exc}", flush=True)
 
     def remember(self, delivery_id):
         self.seen.add(delivery_id)
@@ -273,6 +296,7 @@ class Connector:
             self.remember(item["deliveryID"])
             submitted.append(item)
         self.offset = self.offset + len(values) if more else 0
+        self.health("healthy", detail="Apple Reminders poll completed")
         return submitted
 
 
@@ -303,6 +327,8 @@ def main():
             delay = config["pollIntervalSeconds"]
         except Exception as exc:
             print(f"Apple Reminders poll: {exc}; retrying in {delay:g}s", flush=True)
+            connector.health("retrying", error=str(exc), retry_in=delay,
+                             detail="Apple Reminders poll failed")
             delay = min(delay * 2, 60.0)
         time.sleep(delay)
 

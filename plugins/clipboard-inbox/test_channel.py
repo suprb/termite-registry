@@ -11,7 +11,8 @@ SPEC.loader.exec_module(channel)
 
 class FakeAPI:
     def __init__(self):
-        self.items, self.acks = [], []
+        self.items, self.acks, self.attempts = [], [], []
+        self.verifications, self.health = [], []
 
     def request(self, path, body=None):
         if body is not None:
@@ -20,6 +21,15 @@ class FakeAPI:
 
     def ack(self, *args):
         self.acks.append(args)
+
+    def begin_attempt(self, reply_id):
+        self.attempts.append(reply_id)
+
+    def verification_needed(self, reply_id, error):
+        self.verifications.append((reply_id, error))
+
+    def report_health(self, status, **fields):
+        self.health.append((status, fields))
 
 
 class ClipboardTests(unittest.TestCase):
@@ -55,7 +65,9 @@ class ClipboardTests(unittest.TestCase):
         connector.deliver({"id": "r1", "channel": channel.CHANNEL_ID, "body": "approved"})
         self.assertIsNone(connector.poll_once())
         self.assertEqual(len(api.items), 1)
+        self.assertEqual(api.attempts, ["r1"])
         self.assertEqual(api.acks, [("r1", True)])
+        self.assertEqual(api.health[-1][0], "healthy")
 
     def test_concurrent_reply_write_does_not_replace_self_write_digest(self):
         current = [b"incoming"]
@@ -80,7 +92,22 @@ class ClipboardTests(unittest.TestCase):
         connector.poll_once()
         self.assertIsNone(connector.poll_once())
         self.assertEqual(len(api.items), 1)
+        self.assertEqual(api.attempts, ["r-race"])
         self.assertEqual(api.acks, [("r-race", True)])
+
+    def test_failed_clipboard_write_is_not_automatically_retryable(self):
+        api = FakeAPI()
+
+        def fail(_body):
+            raise TimeoutError("pbcopy acknowledgement lost")
+
+        connector = channel.Connector(
+            api, {"includeCurrentClipboard": True}, lambda: b"", fail)
+        connector.deliver({"id": "r2", "channel": channel.CHANNEL_ID, "body": "approved"})
+        self.assertEqual(api.attempts, ["r2"])
+        self.assertEqual(api.acks, [])
+        self.assertEqual(api.verifications[0][0], "r2")
+        self.assertEqual(api.health[-1][0], "degraded")
 
     def test_output_limit_is_enforced(self):
         with self.assertRaisesRegex(ValueError, "64 KiB"):

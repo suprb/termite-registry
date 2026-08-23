@@ -3,6 +3,7 @@
 
 from collections import deque
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
@@ -32,6 +33,11 @@ def utf8_prefix(value, max_bytes):
 def field(value, default, max_bytes):
     text = str(value) if value is not None else ""
     return utf8_prefix(text if text.strip() else default, max_bytes)
+
+
+def iso_now(offset_seconds=0):
+    value = datetime.now(timezone.utc) + timedelta(seconds=max(0, offset_seconds))
+    return value.isoformat().replace("+00:00", "Z")
 
 
 def load_config(path=CONFIG_PATH, environ=None):
@@ -197,11 +203,28 @@ class TermiteAPI:
             raise ValueError("Termite response exceeds 1 MiB")
         return json.loads(raw) if raw else {}
 
+    def report_health(self, status, detail="", error="", retry_in=None):
+        body = {"status": status, "detail": utf8_prefix(detail, 4096)}
+        if status == "healthy":
+            body["lastSuccessAt"] = iso_now()
+        if error:
+            body["error"] = utf8_prefix(error, 4096)
+            body["lastErrorAt"] = iso_now()
+        if retry_in is not None:
+            body["nextRetryAt"] = iso_now(retry_in)
+        return self.request(f"/v1/channels/{CHANNEL_ID}/health", body)
+
 
 class Connector:
     def __init__(self, api, source, config):
         self.api, self.source, self.config = api, source, config
         self.known, self.order, self.initialized = set(), deque(), False
+
+    def health(self, status, **fields):
+        try:
+            self.api.report_health(status, **fields)
+        except Exception as exc:
+            print(f"Git Watch health update failed: {exc}", flush=True)
 
     def remember(self, commit_hash):
         self.known.add(commit_hash)
@@ -215,6 +238,7 @@ class Connector:
             for commit_hash in hashes:
                 self.remember(commit_hash)
             self.initialized = True
+            self.health("healthy", detail="Git commit baseline completed")
             return []
         submitted = []
         for commit_hash in reversed(hashes):
@@ -225,6 +249,7 @@ class Connector:
             self.remember(commit_hash)
             submitted.append(item)
         self.initialized = True
+        self.health("healthy", detail="Git commit poll completed")
         return submitted
 
 
@@ -253,6 +278,8 @@ def main():
             delay = config["pollIntervalSeconds"]
         except Exception as exc:
             print(f"Git Watch poll: {exc}; retrying in {delay:g}s", flush=True)
+            connector.health("retrying", error=str(exc), retry_in=delay,
+                             detail="Git commit poll failed")
             delay = min(delay * 2, 60.0)
         time.sleep(delay)
 

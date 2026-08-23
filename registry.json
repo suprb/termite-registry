@@ -376,12 +376,32 @@
       "description": "Read incomplete reminders from explicitly allowlisted Apple Reminders lists into the Work Inbox",
       "mode": "read-only",
       "setup": "macOS Reminders list allowlist",
+      "configuration": {
+        "version": 1,
+        "fields": [
+          {
+            "key": "enabled",
+            "label": "Enable Reminders access",
+            "type": "boolean",
+            "required": true,
+            "default": true
+          },
+          {
+            "key": "allowedListNames",
+            "label": "Allowed list names",
+            "type": "string-list",
+            "required": true,
+            "placeholder": "Work, Termite",
+            "help": "Only these Reminders lists are read."
+          }
+        ]
+      },
       "author": "termite",
       "license": "MIT",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "homepage": "https://github.com/andreas-pihlstrom/termite-registry/tree/main/plugins/apple-reminders",
-      "file": "dist/apple-reminders-1.0.0.zip",
-      "sha256": "5563237de54b483787f340923ac77b18cd11c67c3d81f98019ac0c82d9b6731a",
+      "file": "dist/apple-reminders-1.1.0.zip",
+      "sha256": "8a88c72fa444e0aa5f38585bb1be8804e5e5f518f326c15d46cbbb3ecc8117f1",
       "sdk": "v1",
       "capabilities": [
         "channels"
@@ -394,12 +414,39 @@
       "description": "Opt-in macOS clipboard changes as reviewable work, with separately approved clipboard replies",
       "mode": "two-way",
       "setup": "Explicit macOS clipboard opt-in",
+      "configuration": {
+        "version": 1,
+        "fields": [
+          {
+            "key": "enabled",
+            "label": "Enable connector",
+            "type": "boolean",
+            "required": true,
+            "default": true
+          },
+          {
+            "key": "pollClipboard",
+            "label": "Read clipboard changes",
+            "type": "boolean",
+            "required": true,
+            "default": true
+          },
+          {
+            "key": "writeApprovedReplies",
+            "label": "Write approved replies",
+            "type": "boolean",
+            "required": false,
+            "default": false,
+            "help": "Off by default; enabling replaces the current clipboard on delivery."
+          }
+        ]
+      },
       "author": "termite",
       "license": "MIT",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "homepage": "https://github.com/andreas-pihlstrom/termite-registry/tree/main/plugins/clipboard-inbox",
-      "file": "dist/clipboard-inbox-1.0.0.zip",
-      "sha256": "a2ac58b0fecdefbc85c8bf462af07d3a2a602285c1ac50a00b7e60c64e3a7668",
+      "file": "dist/clipboard-inbox-1.1.0.zip",
+      "sha256": "44ec2617865ea12ede959351d08c9439da1e928ffaed7029c4b761efd78b7feb",
       "sdk": "v1",
       "capabilities": [
         "channels",
@@ -413,12 +460,38 @@
       "description": "Bridge an explicitly configured JSON producer and consumer through Termite's reviewed Work Inbox",
       "mode": "two-way",
       "setup": "Producer and consumer argv arrays",
+      "configuration": {
+        "version": 1,
+        "fields": [
+          {
+            "key": "enabled",
+            "label": "Enable command queue",
+            "type": "boolean",
+            "required": true,
+            "default": true
+          },
+          {
+            "key": "producer",
+            "label": "Producer argv",
+            "type": "json",
+            "required": true,
+            "placeholder": "[\"/absolute/path/to/producer\"]"
+          },
+          {
+            "key": "consumer",
+            "label": "Consumer argv",
+            "type": "json",
+            "required": true,
+            "placeholder": "[\"/absolute/path/to/consumer\"]"
+          }
+        ]
+      },
       "author": "termite",
       "license": "MIT",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "homepage": "https://github.com/andreas-pihlstrom/termite-registry/tree/main/plugins/command-queue",
-      "file": "dist/command-queue-1.0.0.zip",
-      "sha256": "183f7f886f530e60c8a950392345cb64fd0f8f77f0e5d251c87bd2cdfa3c6185",
+      "file": "dist/command-queue-1.1.0.zip",
+      "sha256": "b8f1a1cf92629dad08edf88bbbea86ce6acaa7dbae86fbafa14c6e3248ea09b7",
       "sdk": "v1",
       "capabilities": [
         "channels",
@@ -432,12 +505,16 @@
       "description": "A local Receive, Route, Reply example for Termite Channels",
       "mode": "two-way",
       "setup": "No account or credentials",
+      "configuration": {
+        "version": 1,
+        "fields": []
+      },
       "author": "termite",
       "license": "MIT",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "homepage": "https://github.com/andreas-pihlstrom/termite-registry/tree/main/plugins/demo-inbox",
-      "file": "dist/demo-inbox-1.0.0.zip",
-      "sha256": "b79a5e7cdbc637c04584e90ce0e4ffcdba176356a93d0beadeff914835114b51",
+      "file": "dist/demo-inbox-1.1.0.zip",
+      "sha256": "4c804a403d81c335c3bd4cf76addd04ada0ffd48d809da8329571d69cca0cdd1",
       "sdk": "v1",
       "capabilities": [
         "channels",
@@ -451,12 +528,38 @@
       "description": "Routes allowlisted Discord channels through Termite's reviewed inbox",
       "mode": "two-way",
       "setup": "Bot token and channel allowlist",
+      "configuration": {
+        "version": 1,
+        "fields": [
+          {
+            "key": "botToken",
+            "label": "Bot token",
+            "type": "secret",
+            "required": true,
+            "keychainService": "termite.discord"
+          },
+          {
+            "key": "channelIds",
+            "label": "Allowed channel IDs",
+            "type": "string-list",
+            "required": true,
+            "placeholder": "123456789012345678"
+          },
+          {
+            "key": "account",
+            "label": "Account label",
+            "type": "text",
+            "required": false,
+            "placeholder": "workspace-bot"
+          }
+        ]
+      },
       "author": "termite",
       "license": "MIT",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "homepage": "https://github.com/andreas-pihlstrom/termite-registry/tree/main/plugins/discord",
-      "file": "dist/discord-1.0.0.zip",
-      "sha256": "70f0ece54e7fdecbe0a12d1c184bfcca2ae700ccdd719dbdb0295b682dd4c0cb",
+      "file": "dist/discord-1.1.0.zip",
+      "sha256": "cd0e05766bcd5e281ff3436f412f95c59dbb3bf0dc05faf187c4da1ca10fd9b0",
       "sdk": "v1",
       "capabilities": [
         "channels",
@@ -470,12 +573,38 @@
       "description": "Turn files dropped into one explicit folder into reviewed work; write approved replies to an outbox",
       "mode": "two-way",
       "setup": "Explicit inbox and outbox folders",
+      "configuration": {
+        "version": 1,
+        "fields": [
+          {
+            "key": "enabled",
+            "label": "Enable folder access",
+            "type": "boolean",
+            "required": true,
+            "default": true
+          },
+          {
+            "key": "inbox",
+            "label": "Inbox folder",
+            "type": "path",
+            "required": true,
+            "placeholder": "/path/to/inbox"
+          },
+          {
+            "key": "outbox",
+            "label": "Outbox folder",
+            "type": "path",
+            "required": true,
+            "placeholder": "/path/to/outbox"
+          }
+        ]
+      },
       "author": "termite",
       "license": "MIT",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "homepage": "https://github.com/andreas-pihlstrom/termite-registry/tree/main/plugins/folder-drop",
-      "file": "dist/folder-drop-1.0.0.zip",
-      "sha256": "9175f6f40547173c64a40a8b66d35464067a2168f64e35bfeaa48719d46fb65e",
+      "file": "dist/folder-drop-1.1.0.zip",
+      "sha256": "0de602e7f7d6839826e5d59e47504a3c1054ce16ed44dfe61c14d1ccfd5ddaa6",
       "sdk": "v1",
       "capabilities": [
         "channels",
@@ -489,12 +618,38 @@
       "description": "Read new commits from one explicitly configured local repository into the Work Inbox",
       "mode": "read-only",
       "setup": "One local Git repository",
+      "configuration": {
+        "version": 1,
+        "fields": [
+          {
+            "key": "enabled",
+            "label": "Enable repository watch",
+            "type": "boolean",
+            "required": true,
+            "default": true
+          },
+          {
+            "key": "repository",
+            "label": "Repository",
+            "type": "path",
+            "required": true,
+            "placeholder": "/path/to/repository"
+          },
+          {
+            "key": "includeExistingCommits",
+            "label": "Import existing commits",
+            "type": "boolean",
+            "required": false,
+            "default": false
+          }
+        ]
+      },
       "author": "termite",
       "license": "MIT",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "homepage": "https://github.com/andreas-pihlstrom/termite-registry/tree/main/plugins/git-watch",
-      "file": "dist/git-watch-1.0.0.zip",
-      "sha256": "6e29af71507845f6f9bdc9a1535fe8d45f46eb1ff63c43bfd5b624f895ca4379",
+      "file": "dist/git-watch-1.1.0.zip",
+      "sha256": "b9e6a7a4b66f30ce2663acdf7457ba40044bc341a589b1c1e7d52571d8da93cf",
       "sdk": "v1",
       "capabilities": [
         "channels"
@@ -507,12 +662,38 @@
       "description": "Routes allowlisted GitHub issues and comments through Termite's reviewed inbox",
       "mode": "two-way",
       "setup": "Fine-grained token and repository allowlist",
+      "configuration": {
+        "version": 1,
+        "fields": [
+          {
+            "key": "token",
+            "label": "Fine-grained token",
+            "type": "secret",
+            "required": true,
+            "keychainService": "termite.github-issues"
+          },
+          {
+            "key": "repositories",
+            "label": "Allowed repositories",
+            "type": "string-list",
+            "required": true,
+            "placeholder": "owner/repository"
+          },
+          {
+            "key": "account",
+            "label": "GitHub login",
+            "type": "text",
+            "required": false,
+            "placeholder": "octocat"
+          }
+        ]
+      },
       "author": "termite",
       "license": "MIT",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "homepage": "https://github.com/andreas-pihlstrom/termite-registry/tree/main/plugins/github-issues",
-      "file": "dist/github-issues-1.0.0.zip",
-      "sha256": "02734daefb8e952d04ed7c25380abcd7a2d3b200b2cefb5ce545905ebfa6e2ca",
+      "file": "dist/github-issues-1.1.0.zip",
+      "sha256": "ef76507f4fe32c3efb41a9dbbf1565ee93a2daf108d512e418404120840800d9",
       "sdk": "v1",
       "capabilities": [
         "channels",
@@ -526,12 +707,74 @@
       "description": "Poll an IMAP mailbox and optionally send explicitly approved replies with SMTP",
       "mode": "two-way",
       "setup": "IMAP account; SMTP optional",
+      "configuration": {
+        "version": 1,
+        "fields": [
+          {
+            "key": "imap_host",
+            "label": "IMAP host",
+            "type": "text",
+            "required": true,
+            "placeholder": "imap.example.com"
+          },
+          {
+            "key": "username",
+            "label": "IMAP username",
+            "type": "text",
+            "required": true,
+            "placeholder": "you@example.com"
+          },
+          {
+            "key": "password",
+            "label": "IMAP password",
+            "type": "secret",
+            "required": true,
+            "keychainService": "termite.imap-mail"
+          },
+          {
+            "key": "mailbox",
+            "label": "Mailbox",
+            "type": "text",
+            "required": false,
+            "default": "INBOX"
+          },
+          {
+            "key": "smtp_host",
+            "label": "SMTP host",
+            "type": "text",
+            "required": false,
+            "placeholder": "smtp.example.com",
+            "help": "Optional; required only for approved replies."
+          },
+          {
+            "key": "smtp_username",
+            "label": "SMTP username",
+            "type": "text",
+            "required": false,
+            "placeholder": "you@example.com"
+          },
+          {
+            "key": "smtp_password",
+            "label": "SMTP password",
+            "type": "secret",
+            "required": false,
+            "keychainService": "termite.imap-mail.smtp"
+          },
+          {
+            "key": "from_address",
+            "label": "From address",
+            "type": "text",
+            "required": false,
+            "placeholder": "you@example.com"
+          }
+        ]
+      },
       "author": "termite",
       "license": "MIT",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "homepage": "https://github.com/andreas-pihlstrom/termite-registry/tree/main/plugins/imap-mail",
-      "file": "dist/imap-mail-1.0.0.zip",
-      "sha256": "db24f6011815fecb377cf708fbacc85b5906b329c423aee000f64a025a9d1c12",
+      "file": "dist/imap-mail-1.1.0.zip",
+      "sha256": "d0d7a58b2ab861e72a2bd197108d78624c48fd6dbeac341cfd19b42705bf6630",
       "sdk": "v1",
       "capabilities": [
         "channels",
@@ -545,12 +788,38 @@
       "description": "Allowlisted Messages conversations as reviewable work with explicitly enabled approved replies",
       "mode": "two-way",
       "setup": "Full Disk Access and chat allowlist",
+      "configuration": {
+        "version": 1,
+        "fields": [
+          {
+            "key": "enabled",
+            "label": "Enable Messages access",
+            "type": "boolean",
+            "required": true,
+            "default": true
+          },
+          {
+            "key": "allowedHandles",
+            "label": "Allowed handles",
+            "type": "string-list",
+            "required": true,
+            "placeholder": "+46700000000, person@example.com"
+          },
+          {
+            "key": "sendApprovedReplies",
+            "label": "Allow approved replies",
+            "type": "boolean",
+            "required": false,
+            "default": false
+          }
+        ]
+      },
       "author": "termite",
       "license": "MIT",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "homepage": "https://github.com/andreas-pihlstrom/termite-registry/tree/main/plugins/imessage",
-      "file": "dist/imessage-1.0.0.zip",
-      "sha256": "01bbcc95118fc481b2b0a435fbbbfe588d4a7b8201fe263cfc3b2dce5d7741ee",
+      "file": "dist/imessage-1.1.0.zip",
+      "sha256": "65b67e28157cff231256723d9b6353ff6d8ee95c08aa6b74eb3ac6857413f40c",
       "sdk": "v1",
       "capabilities": [
         "channels",
@@ -564,12 +833,45 @@
       "description": "Routes allowlisted Jira Cloud issues and comments through Termite",
       "mode": "two-way",
       "setup": "Jira URL, API token, and project allowlist",
+      "configuration": {
+        "version": 1,
+        "fields": [
+          {
+            "key": "baseUrl",
+            "label": "Jira site",
+            "type": "text",
+            "required": true,
+            "placeholder": "https://your-site.atlassian.net"
+          },
+          {
+            "key": "email",
+            "label": "Account email",
+            "type": "text",
+            "required": true,
+            "placeholder": "you@example.com"
+          },
+          {
+            "key": "apiToken",
+            "label": "API token",
+            "type": "secret",
+            "required": true,
+            "keychainService": "termite.jira"
+          },
+          {
+            "key": "projectKeys",
+            "label": "Allowed project keys",
+            "type": "string-list",
+            "required": true,
+            "placeholder": "ENG, OPS"
+          }
+        ]
+      },
       "author": "termite",
       "license": "MIT",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "homepage": "https://github.com/andreas-pihlstrom/termite-registry/tree/main/plugins/jira",
-      "file": "dist/jira-1.0.0.zip",
-      "sha256": "35b2dfdb7dbe2ebb8a8dff1b704923caae4053670306f599535b135707dfd7cc",
+      "file": "dist/jira-1.1.0.zip",
+      "sha256": "2c644d8788ba61e39f4a77e51ddbb41d67716d5f453bd93936c8b0c0dd3f7655",
       "sdk": "v1",
       "capabilities": [
         "channels",
@@ -583,12 +885,37 @@
       "description": "Routes scoped Linear issues through Termite's reviewed inbox",
       "mode": "two-way",
       "setup": "API token and team allowlist",
+      "configuration": {
+        "version": 1,
+        "fields": [
+          {
+            "key": "apiKey",
+            "label": "API key",
+            "type": "secret",
+            "required": true,
+            "keychainService": "termite.linear"
+          },
+          {
+            "key": "teamIds",
+            "label": "Allowed team IDs",
+            "type": "string-list",
+            "required": true,
+            "placeholder": "00000000-0000-0000-0000-000000000000"
+          },
+          {
+            "key": "projectIds",
+            "label": "Allowed project IDs",
+            "type": "string-list",
+            "required": false
+          }
+        ]
+      },
       "author": "termite",
       "license": "MIT",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "homepage": "https://github.com/andreas-pihlstrom/termite-registry/tree/main/plugins/linear",
-      "file": "dist/linear-1.0.0.zip",
-      "sha256": "c844335f66f1ccd6ebb23a22a271ed891e5339043310e874a102c5986ea907da",
+      "file": "dist/linear-1.1.0.zip",
+      "sha256": "b37e49b54a6c4368d14098f014de75196bffddcb51c972d771a83fd16d2e599a",
       "sdk": "v1",
       "capabilities": [
         "channels",
@@ -602,12 +929,38 @@
       "description": "Receive Mastodon mentions and send only explicitly approved replies",
       "mode": "two-way",
       "setup": "Instance URL and access token",
+      "configuration": {
+        "version": 1,
+        "fields": [
+          {
+            "key": "base_url",
+            "label": "Instance URL",
+            "type": "text",
+            "required": true,
+            "placeholder": "https://mastodon.social"
+          },
+          {
+            "key": "access_token",
+            "label": "Access token",
+            "type": "secret",
+            "required": true,
+            "keychainService": "termite.mastodon"
+          },
+          {
+            "key": "account",
+            "label": "Account label",
+            "type": "text",
+            "required": true,
+            "placeholder": "@you@example.social"
+          }
+        ]
+      },
       "author": "termite",
       "license": "MIT",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "homepage": "https://github.com/andreas-pihlstrom/termite-registry/tree/main/plugins/mastodon",
-      "file": "dist/mastodon-1.0.0.zip",
-      "sha256": "0775ca13069ed3b340b0e5fb15c243eec0bfb951f91ec4e7a328e93df3198c8d",
+      "file": "dist/mastodon-1.1.0.zip",
+      "sha256": "4d4d4e66eba05d5230973c685ecb6d7a3dfb9263ac00bc68e5b2d58fc6309f45",
       "sdk": "v1",
       "capabilities": [
         "channels",
@@ -621,12 +974,45 @@
       "description": "Receive messages from explicitly allowed Matrix rooms and send approved replies",
       "mode": "two-way",
       "setup": "Homeserver token and room allowlist",
+      "configuration": {
+        "version": 1,
+        "fields": [
+          {
+            "key": "homeserver",
+            "label": "Homeserver",
+            "type": "text",
+            "required": true,
+            "placeholder": "https://matrix.example.com"
+          },
+          {
+            "key": "access_token",
+            "label": "Access token",
+            "type": "secret",
+            "required": true,
+            "keychainService": "termite.matrix"
+          },
+          {
+            "key": "room_ids",
+            "label": "Allowed room IDs",
+            "type": "string-list",
+            "required": true,
+            "placeholder": "!room-id:example.com"
+          },
+          {
+            "key": "own_user_id",
+            "label": "Your Matrix user ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "@you:example.com"
+          }
+        ]
+      },
       "author": "termite",
       "license": "MIT",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "homepage": "https://github.com/andreas-pihlstrom/termite-registry/tree/main/plugins/matrix",
-      "file": "dist/matrix-1.0.0.zip",
-      "sha256": "3c2c4ed97c5184a0c57b161ec84c1e3c7b6207d5ee0ce00be82dce7057c69593",
+      "file": "dist/matrix-1.1.0.zip",
+      "sha256": "75e9eae67c945f9cf26cd5ebe08ea1e1891ee67e86a9757adc1fde8a0fd5405f",
       "sdk": "v1",
       "capabilities": [
         "channels",
@@ -640,12 +1026,45 @@
       "description": "Receive allowlisted ntfy topics and optionally publish approved replies to one fixed topic",
       "mode": "two-way",
       "setup": "Server, topic allowlist, and optional token",
+      "configuration": {
+        "version": 1,
+        "fields": [
+          {
+            "key": "server_url",
+            "label": "Server URL",
+            "type": "text",
+            "required": true,
+            "default": "https://ntfy.sh"
+          },
+          {
+            "key": "topics",
+            "label": "Subscribed topics",
+            "type": "string-list",
+            "required": true,
+            "placeholder": "your-private-inbox"
+          },
+          {
+            "key": "access_token",
+            "label": "Access token",
+            "type": "secret",
+            "required": false,
+            "keychainService": "termite.ntfy"
+          },
+          {
+            "key": "reply_topic",
+            "label": "Reply topic",
+            "type": "text",
+            "required": false,
+            "placeholder": "termite-replies"
+          }
+        ]
+      },
       "author": "termite",
       "license": "MIT",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "homepage": "https://github.com/andreas-pihlstrom/termite-registry/tree/main/plugins/ntfy",
-      "file": "dist/ntfy-1.0.0.zip",
-      "sha256": "7a285f674f20a56b2c2a4a6f7d04e3067eaf98edf430754fff74a1e2eeb748da",
+      "file": "dist/ntfy-1.1.0.zip",
+      "sha256": "b44c57a3b80c0a18fe353531444aa55c32964b5ecf2547b596f3c78237f0215a",
       "sdk": "v1",
       "capabilities": [
         "channels",
@@ -659,12 +1078,31 @@
       "description": "Poll RSS and Atom feeds into a read-only Termite Channel",
       "mode": "read-only",
       "setup": "One or more HTTPS feed URLs",
+      "configuration": {
+        "version": 1,
+        "fields": [
+          {
+            "key": "feed_urls",
+            "label": "Feed URLs",
+            "type": "string-list",
+            "required": true,
+            "placeholder": "https://example.com/feed.xml"
+          },
+          {
+            "key": "bearer_token",
+            "label": "Bearer token",
+            "type": "secret",
+            "required": false,
+            "keychainService": "termite.rss-feed"
+          }
+        ]
+      },
       "author": "termite",
       "license": "MIT",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "homepage": "https://github.com/andreas-pihlstrom/termite-registry/tree/main/plugins/rss-feed",
-      "file": "dist/rss-feed-1.0.0.zip",
-      "sha256": "8598ba12e74a13ecc07983b13d8029855fa5963f5ce04eb593ee46486351bd76",
+      "file": "dist/rss-feed-1.1.0.zip",
+      "sha256": "b2d3784f45b2fee516d03b21e84d702c74e4dc5c7563825b4cb013d71d791218",
       "sdk": "v1",
       "capabilities": [
         "channels"
@@ -677,12 +1115,38 @@
       "description": "Routes one selected Slack channel through Termite's reviewed inbox",
       "mode": "two-way",
       "setup": "Bot token and channel ID",
+      "configuration": {
+        "version": 1,
+        "fields": [
+          {
+            "key": "botToken",
+            "label": "Bot token",
+            "type": "secret",
+            "required": true,
+            "keychainService": "termite.slack"
+          },
+          {
+            "key": "channelId",
+            "label": "Channel ID",
+            "type": "text",
+            "required": true,
+            "placeholder": "C0123456789"
+          },
+          {
+            "key": "account",
+            "label": "Workspace label",
+            "type": "text",
+            "required": false,
+            "placeholder": "workspace-name"
+          }
+        ]
+      },
       "author": "termite",
       "license": "MIT",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "homepage": "https://github.com/andreas-pihlstrom/termite-registry/tree/main/plugins/slack",
-      "file": "dist/slack-1.0.0.zip",
-      "sha256": "b98b9939f39d6044542c2bfc3f3c2743f621430e87fc53861669285b5283b80b",
+      "file": "dist/slack-1.1.0.zip",
+      "sha256": "5a43fc3928249e01232d9f8cb8a62df4fde812bb9d26a8a4a5234c87cb2b8c6a",
       "sdk": "v1",
       "capabilities": [
         "channels",
@@ -696,12 +1160,38 @@
       "description": "Routes allowlisted Telegram chats through Termite's reviewed inbox",
       "mode": "two-way",
       "setup": "Bot token and chat allowlist",
+      "configuration": {
+        "version": 1,
+        "fields": [
+          {
+            "key": "botToken",
+            "label": "Bot token",
+            "type": "secret",
+            "required": true,
+            "keychainService": "termite.telegram"
+          },
+          {
+            "key": "allowedChatIds",
+            "label": "Allowed chat IDs",
+            "type": "integer-list",
+            "required": true,
+            "placeholder": "-1001234567890"
+          },
+          {
+            "key": "account",
+            "label": "Bot label",
+            "type": "text",
+            "required": false,
+            "placeholder": "my_bot"
+          }
+        ]
+      },
       "author": "termite",
       "license": "MIT",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "homepage": "https://github.com/andreas-pihlstrom/termite-registry/tree/main/plugins/telegram",
-      "file": "dist/telegram-1.0.0.zip",
-      "sha256": "58e49f418aaa4d911fd12b42ef1ae6fc78730e8e08d5a4bb51b3cc79c48dc7f0",
+      "file": "dist/telegram-1.1.0.zip",
+      "sha256": "e25cad514b5c675239182eb8510de5afd3444403137c6178918043d1522fd092",
       "sdk": "v1",
       "capabilities": [
         "channels",
@@ -715,12 +1205,45 @@
       "description": "Receive authenticated JSON webhooks and return approved replies to one configured callback",
       "mode": "two-way",
       "setup": "Shared secret; callback optional",
+      "configuration": {
+        "version": 1,
+        "fields": [
+          {
+            "key": "inbound_secret",
+            "label": "Inbound shared secret",
+            "type": "secret",
+            "required": true,
+            "keychainService": "termite.webhook-inbox"
+          },
+          {
+            "key": "listen_port",
+            "label": "Listen port",
+            "type": "integer",
+            "required": true,
+            "default": 8787
+          },
+          {
+            "key": "callback_url",
+            "label": "Reply callback URL",
+            "type": "text",
+            "required": false,
+            "placeholder": "https://example.com/termite-replies"
+          },
+          {
+            "key": "callback_bearer_token",
+            "label": "Callback bearer token",
+            "type": "secret",
+            "required": false,
+            "keychainService": "termite.webhook-inbox.callback"
+          }
+        ]
+      },
       "author": "termite",
       "license": "MIT",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "homepage": "https://github.com/andreas-pihlstrom/termite-registry/tree/main/plugins/webhook-inbox",
-      "file": "dist/webhook-inbox-1.0.0.zip",
-      "sha256": "bb2c9dd49e7dad285b5cfaaea019fb41bc09b72362f8c66c47091dd30234b948",
+      "file": "dist/webhook-inbox-1.1.0.zip",
+      "sha256": "8ecbcd335dc359970cf2f80b3b440079cbbcda708fdcf411a569b08b85c1a116",
       "sdk": "v1",
       "capabilities": [
         "channels",

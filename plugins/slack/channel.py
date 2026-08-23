@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 import stat
 import subprocess
@@ -23,10 +24,20 @@ KEYCHAIN_SERVICE = "termite.slack"
 SLACK_API = "https://slack.com/api"
 MAX_HTTP_BYTES = 8 * 1024 * 1024
 MAX_SSE_LINE_BYTES = 256 * 1024
+HEALTH_STATUSES = {"healthy", "degraded", "retrying", "offline"}
+HEALTH_FIELD_BYTES = {"lastSuccessAt": 128, "lastErrorAt": 128, "error": 1024,
+                      "nextRetryAt": 128, "detail": 2048}
 
 
 class ConnectorError(RuntimeError):
     pass
+
+
+class UncertainDeliveryError(ConnectorError):
+    pass
+
+
+def iso_now(): return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 class RejectRedirects(urllib.request.HTTPRedirectHandler):
@@ -45,6 +56,10 @@ def read_json(response, source):
         return json.loads(payload) if payload else {}
     except json.JSONDecodeError as exc:
         raise ConnectorError(f"{source} returned invalid JSON") from exc
+
+
+def utf8_prefix(value, max_bytes):
+    return str(value).encode("utf-8")[:max_bytes].decode("utf-8", "ignore")
 
 
 def truncate(text, limit=60000):
@@ -123,8 +138,27 @@ class TermiteClient:
     def acknowledge(self, reply_id: str, delivered: bool, error: str | None = None):
         body = {"delivered": delivered}
         if error:
-            body["error"] = error[:500]
+            body["error"] = utf8_prefix(error, 1024)
         return self.request(f"/v1/channel-replies/{reply_id}/ack", body)
+
+    def begin_reply_attempt(self, reply_id: str):
+        return self.request(f"/v1/channel-replies/{reply_id}/attempt", {})
+
+    def verification_needed(self, reply_id: str, error: str):
+        return self.request(f"/v1/channel-replies/{reply_id}/ack", {
+            "state": "verification-needed", "error": utf8_prefix(error, 1024),
+        })
+
+    def report_health(self, status: str, **fields):
+        if status not in HEALTH_STATUSES:
+            raise ConnectorError(f"invalid provider health status: {status}")
+        unknown = set(fields) - set(HEALTH_FIELD_BYTES)
+        if unknown:
+            raise ConnectorError(f"invalid provider health field: {sorted(unknown)[0]}")
+        body = {"status": status}
+        body.update({key: utf8_prefix(value, HEALTH_FIELD_BYTES[key])
+                     for key, value in fields.items() if value is not None})
+        return self.request(f"/v1/channels/{CHANNEL_ID}/health", body)
 
     def pending_replies(self):
         return self.request("/v1/channel-replies").get("replies", [])
@@ -163,7 +197,9 @@ class SlackClient:
         except urllib.error.HTTPError as exc:
             raise ConnectorError(f"Slack HTTP {exc.code}") from exc
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-            raise ConnectorError(f"Slack request failed: {type(exc).__name__}") from exc
+            error = f"Slack request failed: {type(exc).__name__}"
+            if method == "chat.postMessage": raise UncertainDeliveryError(error) from exc
+            raise ConnectorError(error) from exc
         if not result.get("ok"):
             raise ConnectorError(f"Slack API rejected request: {result.get('error', 'unknown_error')}")
         return result
@@ -216,8 +252,15 @@ class SlackConnector:
         self._delivering: set[str] = set()
         self._delivery_lock = threading.Lock()
 
+    def _health(self, status, **fields):
+        try: self.termite.report_health(status, **fields)
+        except Exception as exc: print(f"Slack health report failed: {exc}", file=sys.stderr)
+
     def poll_once(self):
-        messages = self.slack.history(self.channel_id, self.oldest)
+        try: messages = self.slack.history(self.channel_id, self.oldest)
+        except Exception as exc:
+            self._health("retrying", error=str(exc), lastErrorAt=iso_now(), detail="Slack provider poll failed")
+            raise
         for message in messages:
             ts = str(message.get("ts", ""))
             if not ts:
@@ -246,6 +289,7 @@ class SlackConnector:
                 "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(ts))),
             })
             self.oldest = max(self.oldest, ts, key=float)
+        self._health("healthy", lastSuccessAt=iso_now(), detail="Slack poll completed")
 
     def deliver(self, reply: dict):
         reply_id = str(reply.get("id", ""))
@@ -264,11 +308,19 @@ class SlackConnector:
             if str(reply.get("conversationID", "")) != self.channel_id:
                 self.termite.acknowledge(reply_id, False, "Slack reply targeted a channel outside this connector's configuration")
                 return
+            try: self.termite.begin_reply_attempt(reply_id)
+            except Exception: return
             try:
                 self.slack.send(reply)
+            except UncertainDeliveryError as exc:
+                self._health("degraded", error=str(exc), lastErrorAt=iso_now(),
+                             detail="Slack delivery needs verification")
+                self.termite.verification_needed(reply_id, str(exc))
             except Exception as exc:
+                self._health("degraded", error=str(exc), lastErrorAt=iso_now(), detail="Slack delivery failed")
                 self.termite.acknowledge(reply_id, False, str(exc))
             else:
+                self._health("healthy", lastSuccessAt=iso_now(), detail="Slack delivery completed")
                 self.termite.acknowledge(reply_id, True)
         finally:
             with self._delivery_lock:
@@ -288,10 +340,14 @@ class SlackConnector:
                 delay = min(delay * 2, 30)
 
     def run(self):
-        self.own_user_id, detected_account = self.slack.identity()
+        try: self.own_user_id, detected_account = self.slack.identity()
+        except Exception as exc:
+            self._health("offline", error=str(exc), lastErrorAt=iso_now(), detail="Slack identity failed")
+            raise
         if not self.account:
             self.account = detected_account
         registration = self.termite.register(self.account)
+        self._health("healthy", lastSuccessAt=iso_now(), detail="Slack identity verified")
         for reply in registration.get("pendingReplies", []):
             self.deliver(reply)
         threading.Thread(target=self.listen, name="termite-events", daemon=True).start()

@@ -61,11 +61,35 @@ class NtfyTests(unittest.TestCase):
 
     def test_success_ack_failure_is_not_relabelled_provider_failure(self):
         client = mock.Mock()
-        client.request.side_effect = RuntimeError("host temporarily unavailable")
+        def request(path, body):
+            if path.endswith("/ack"):
+                raise RuntimeError("host temporarily unavailable")
+            return {}
+        client.request.side_effect = request
         api = mock.Mock()
         with self.assertRaisesRegex(RuntimeError, "host temporarily"):
             channel.deliver(client, api, {"id": "r1"})
-        client.request.assert_called_once_with("/v1/channel-replies/r1/ack", {"delivered": True})
+        self.assertEqual(client.request.call_args_list[0], mock.call("/v1/channel-replies/r1/attempt", {}))
+        self.assertEqual(client.request.call_args_list[1].args[0], f"/v1/channels/{channel.CHANNEL_ID}/health")
+        self.assertEqual(client.request.call_args_list[1].args[1]["status"], "healthy")
+        self.assertEqual(client.request.call_args_list[2], mock.call("/v1/channel-replies/r1/ack", {"delivered": True}))
+
+    def test_attempt_failure_prevents_ntfy_publish(self):
+        client = mock.Mock()
+        client.request.side_effect = RuntimeError("attempt rejected")
+        api = mock.Mock()
+        with self.assertRaisesRegex(RuntimeError, "attempt rejected"):
+            channel.deliver(client, api, {"id": "r1"})
+        api.publish.assert_not_called()
+        client.request.assert_called_once_with("/v1/channel-replies/r1/attempt", {})
+
+    def test_ambiguous_ntfy_transport_failure_requires_verification(self):
+        client = mock.Mock()
+        api = mock.Mock()
+        api.publish.side_effect = channel.urllib.error.URLError("reset")
+        channel.deliver(client, api, {"id": "r1"})
+        self.assertEqual(client.request.call_args_list[0], mock.call("/v1/channel-replies/r1/attempt", {}))
+        self.assertEqual(client.request.call_args_list[-1].args[1]["state"], "verification-needed")
 
 
 if __name__ == "__main__":

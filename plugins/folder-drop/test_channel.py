@@ -3,12 +3,30 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 
 MODULE_PATH = Path(__file__).with_name("channel.py")
 SPEC = importlib.util.spec_from_file_location("folder_drop_channel", MODULE_PATH)
 channel = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(channel)
+
+
+class FakeAPI:
+    def __init__(self):
+        self.timeline, self.health_updates = [], []
+
+    def begin_attempt(self, reply_id):
+        self.timeline.append(("attempt", reply_id))
+
+    def ack(self, reply_id, delivered, error=None):
+        self.timeline.append(("ack", reply_id, delivered, error))
+
+    def verification_needed(self, reply_id, error):
+        self.timeline.append(("verification", reply_id, error))
+
+    def report_health(self, status, **fields):
+        self.health_updates.append((status, fields))
 
 
 class FolderDropTests(unittest.TestCase):
@@ -64,6 +82,25 @@ class FolderDropTests(unittest.TestCase):
             target = channel.write_reply(outbox, reply)
             self.assertGreater(target.stat().st_size, channel.MAX_FILE_BYTES)
             self.assertEqual(channel.write_reply(outbox, reply), target)
+
+    def test_reply_attempt_precedes_durable_outbox_and_ack(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            api = FakeAPI()
+            connector = channel.Connector(api, {"outbox": Path(tmp)})
+            connector.deliver({"id": "r1", "channel": channel.CHANNEL_ID, "body": "done"})
+            self.assertEqual(api.timeline, [("attempt", "r1"), ("ack", "r1", True, None)])
+            self.assertEqual(len(list(Path(tmp).glob("reply-*.json"))), 1)
+            self.assertEqual(api.health_updates[-1][0], "healthy")
+
+    def test_uncertain_outbox_failure_requires_verification(self):
+        api = FakeAPI()
+        connector = channel.Connector(api, {"outbox": Path("/unused")})
+        with mock.patch.object(channel, "write_reply", side_effect=OSError("ack lost")):
+            connector.deliver({"id": "r2", "channel": channel.CHANNEL_ID, "body": "done"})
+        self.assertEqual(api.timeline[0], ("attempt", "r2"))
+        self.assertEqual(api.timeline[1][0:2], ("verification", "r2"))
+        self.assertNotIn(("ack", "r2", False, None), api.timeline)
+        self.assertEqual(api.health_updates[-1][0], "degraded")
 
 
 if __name__ == "__main__":

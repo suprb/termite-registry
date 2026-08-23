@@ -13,7 +13,8 @@ SPEC.loader.exec_module(channel)
 
 class FakeAPI:
     def __init__(self):
-        self.items, self.acks = [], []
+        self.items, self.acks, self.attempts = [], [], []
+        self.verifications, self.health = [], []
 
     def request(self, path, body=None):
         if body is not None:
@@ -22,6 +23,15 @@ class FakeAPI:
 
     def ack(self, *args):
         self.acks.append(args)
+
+    def begin_attempt(self, reply_id):
+        self.attempts.append(reply_id)
+
+    def verification_needed(self, reply_id, error):
+        self.verifications.append((reply_id, error))
+
+    def report_health(self, status, **fields):
+        self.health.append((status, fields))
 
 
 class CommandQueueTests(unittest.TestCase):
@@ -53,9 +63,28 @@ class CommandQueueTests(unittest.TestCase):
         connector = channel.Connector(api, config, runner)
         connector.deliver({"id": "reply-1", "channel": channel.CHANNEL_ID,
                            "conversationID": "ticket-42", "body": "approved; $(unsafe)"})
+        self.assertEqual(api.attempts, ["reply-1"])
         self.assertEqual(calls[0][0], ["/consumer", "--stdin"])
         self.assertEqual(json.loads(calls[0][1])["body"], "approved; $(unsafe)")
         self.assertEqual(api.acks, [("reply-1", True)])
+        self.assertEqual(api.health[-1][0], "healthy")
+
+    def test_consumer_failure_after_attempt_needs_verification(self):
+        api = FakeAPI()
+
+        def runner(_argv, **_kwargs):
+            raise TimeoutError("consumer result unknown")
+
+        config = {"producer": ["/producer"], "consumer": ["/consumer"],
+                  "producerTimeoutSeconds": 2, "consumerTimeoutSeconds": 3,
+                  "maxItemsPerPoll": 16}
+        connector = channel.Connector(api, config, runner)
+        connector.deliver({"id": "reply-2", "channel": channel.CHANNEL_ID,
+                           "conversationID": "ticket-42", "body": "approved"})
+        self.assertEqual(api.attempts, ["reply-2"])
+        self.assertEqual(api.acks, [])
+        self.assertEqual(api.verifications[0][0], "reply-2")
+        self.assertEqual(api.health[-1][0], "degraded")
 
     def test_poll_deduplicates_repeated_producer_output(self):
         api = FakeAPI()

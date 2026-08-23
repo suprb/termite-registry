@@ -7,6 +7,7 @@ Exit 0 = publishable.
 """
 import hashlib
 import json
+import re
 import stat
 import subprocess
 import sys
@@ -17,6 +18,11 @@ from pathlib import Path, PurePosixPath
 ROOT = Path(__file__).resolve().parent.parent
 KINDS = {"shader", "theme", "rig", "patch", "plugin", "channel"}
 CHANNEL_MODES = {"two-way", "inbound-only", "read-only"}
+CHANNEL_FIELD_TYPES = {
+    "text", "secret", "boolean", "integer", "string-list", "integer-list",
+    "path", "json",
+}
+CHANNEL_FIELD_KEY = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
 REQUIRED = ["kind", "id", "name", "description", "author", "license", "version"]
 
 errors = []
@@ -145,6 +151,45 @@ def check_extension(entry):
             err(f"{entry['id']}: two-way Channel needs events.read for approved replies")
         if mode in {"read-only", "inbound-only"} and isinstance(capabilities, list) and "events.read" in capabilities:
             err(f"{entry['id']}: non-replying Channel must not request events.read")
+        configuration = entry.get("configuration")
+        if not isinstance(configuration, dict) or configuration.get("version") != 1:
+            err(f"{entry['id']}: Channel needs a v1 configuration contract")
+        else:
+            fields = configuration.get("fields")
+            if not isinstance(fields, list) or len(fields) > 32:
+                err(f"{entry['id']}: configuration fields must be an array of at most 32 entries")
+            else:
+                keys = set()
+                for index, field in enumerate(fields):
+                    label = f"{entry['id']}: configuration field {index + 1}"
+                    if not isinstance(field, dict):
+                        err(f"{label} must be an object")
+                        continue
+                    key = field.get("key")
+                    if not isinstance(key, str) or not CHANNEL_FIELD_KEY.fullmatch(key):
+                        err(f"{label} has an invalid key")
+                    elif key in keys:
+                        err(f"{entry['id']}: duplicate configuration key '{key}'")
+                    else:
+                        keys.add(key)
+                    if not isinstance(field.get("label"), str) or not field["label"].strip():
+                        err(f"{label} needs a display label")
+                    if field.get("type") not in CHANNEL_FIELD_TYPES:
+                        err(f"{label} has an unknown type")
+                    if not isinstance(field.get("required"), bool):
+                        err(f"{label} needs a boolean required flag")
+                    secret = field.get("type") == "secret"
+                    service = field.get("keychainService")
+                    if secret and (not isinstance(service, str) or not service.startswith("termite.")):
+                        err(f"{label} secret needs a termite.* Keychain service")
+                    if not secret and service is not None:
+                        err(f"{label} cannot declare Keychain storage unless it is secret")
+                    if secret and "default" in field:
+                        err(f"{label} must not include a secret default")
+                    for text_key in ("placeholder", "help"):
+                        text = field.get(text_key)
+                        if text is not None and (not isinstance(text, str) or len(text.encode()) > 512):
+                            err(f"{label} {text_key} must be bounded text")
 
     rel = entry.get("file")
     if not rel:

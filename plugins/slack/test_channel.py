@@ -14,12 +14,15 @@ import channel
 
 class FakeTermite:
     def __init__(self):
-        self.items, self.acks, self.queued = [], [], None
+        self.items, self.acks, self.queued, self.attempts, self.health = [], [], None, [], []
     def ingest(self, item): self.items.append(item)
     def reply_is_queued(self, reply_id): return self.queued is None or reply_id in self.queued
     def acknowledge(self, *args):
         self.acks.append(args)
         if self.queued is not None: self.queued.discard(args[0])
+    def begin_reply_attempt(self, reply_id): self.attempts.append(reply_id)
+    def verification_needed(self, reply_id, error): self.acks.append((reply_id, "verification-needed", error))
+    def report_health(self, status, **fields): self.health.append((status, fields))
 
 
 class FakeSlack:
@@ -73,18 +76,50 @@ class SlackConnectorTests(unittest.TestCase):
         self.assertEqual(len(termite.items), 1)
         self.assertEqual(termite.items[0]["deliveryID"], "slack:C1:1712345.100")
         self.assertEqual(termite.items[0]["replyToID"], "1712345.100")
+        self.assertEqual(termite.health[-1][0], "healthy")
+
+    def test_provider_poll_failure_reports_retrying(self):
+        termite = FakeTermite(); slack = FakeSlack(); slack.history = mock.Mock(side_effect=channel.ConnectorError("offline"))
+        connector = channel.SlackConnector(termite, slack, "C1", "team", 5, 0)
+        with self.assertRaises(channel.ConnectorError): connector.poll_once()
+        self.assertEqual(termite.health[-1][0], "retrying")
+
+    def test_event_stream_failure_does_not_change_provider_health(self):
+        termite = FakeTermite(); termite.events = mock.Mock(side_effect=channel.ConnectorError("Termite unavailable"))
+        connector = channel.SlackConnector(termite, FakeSlack(), "C1", "team", 5, 0)
+        with mock.patch.object(channel.time, "sleep", side_effect=RuntimeError("stop")):
+            with self.assertRaisesRegex(RuntimeError, "stop"): connector.listen()
+        self.assertEqual(termite.health, [])
 
     def test_failed_delivery_is_acknowledged(self):
         termite = FakeTermite()
         connector = channel.SlackConnector(termite, FakeSlack(failure="rejected"), "C1", "team", 5, 0)
         connector.deliver({"id": "r1", "conversationID": "C1", "body": "done"})
+        self.assertEqual(termite.attempts, ["r1"])
         self.assertEqual(termite.acks, [("r1", False, "rejected")])
+        self.assertEqual(termite.health[-1][0], "degraded")
+
+    def test_uncertain_delivery_requires_verification(self):
+        termite = FakeTermite(); slack = FakeSlack()
+        slack.send = mock.Mock(side_effect=channel.UncertainDeliveryError("timeout after send"))
+        connector = channel.SlackConnector(termite, slack, "C1", "team", 5, 0)
+        connector.deliver({"id": "r1", "conversationID": "C1", "body": "done"})
+        self.assertEqual(termite.attempts, ["r1"])
+        self.assertEqual(termite.acks, [("r1", "verification-needed", "timeout after send")])
+        self.assertEqual(termite.health[-1][0], "degraded")
+
+    def test_send_network_failure_is_uncertain(self):
+        slack = channel.SlackClient("secret")
+        slack.opener.open = mock.Mock(side_effect=urllib.error.URLError("timeout"))
+        with self.assertRaises(channel.UncertainDeliveryError):
+            slack.call("chat.postMessage", body={"channel": "C1", "text": "done"})
 
     def test_stale_recovery_copy_is_not_sent_or_acked_twice(self):
         termite = FakeTermite(); termite.queued = {"r1"}
         slack = FakeSlack(); connector = channel.SlackConnector(termite, slack, "C1", "team", 5, 0)
         reply = {"id": "r1", "conversationID": "C1", "body": "done"}
         connector.deliver(reply); connector.deliver(reply)
+        self.assertEqual(termite.attempts, ["r1"])
         self.assertEqual(termite.acks, [("r1", True)])
 
     def test_environment_overrides_config(self):

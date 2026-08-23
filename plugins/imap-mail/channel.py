@@ -8,6 +8,7 @@ from email.header import decode_header, make_header
 from email.message import EmailMessage, Message
 from email.parser import BytesParser
 from email.utils import parseaddr
+from datetime import datetime, timedelta, timezone
 import hashlib
 import imaplib
 import json
@@ -28,10 +29,37 @@ PLUGIN_DIR = Path(__file__).resolve().parent
 CHANNEL_ID = "dev.termite.imap-mail.inbox"
 MAX_MESSAGE_BYTES = 512 * 1024
 MAX_BODY_BYTES = 64 * 1024
+_last_success_at: str | None = None
+_last_error_at: str | None = None
 
 
 def bounded(value: Any, limit: int) -> str:
     return str(value).encode("utf-8")[:limit].decode("utf-8", "ignore")
+
+
+def report_health(client: Any, status: str, *, error: str = "",
+                  retry_in: int | None = None, detail: str = "") -> None:
+    global _last_success_at, _last_error_at
+    now = datetime.now(timezone.utc)
+    if status == "healthy":
+        _last_success_at = now.isoformat().replace("+00:00", "Z")
+    if error:
+        _last_error_at = now.isoformat().replace("+00:00", "Z")
+    body: dict[str, Any] = {"status": status}
+    if _last_success_at:
+        body["lastSuccessAt"] = _last_success_at
+    if _last_error_at:
+        body["lastErrorAt"] = _last_error_at
+    if error:
+        body["error"] = bounded(error, 1024)
+    if retry_in is not None:
+        body["nextRetryAt"] = (now + timedelta(seconds=max(0, retry_in))).isoformat().replace("+00:00", "Z")
+    if detail:
+        body["detail"] = bounded(detail, 2048)
+    try:
+        client.request(f"/v1/channels/{CHANNEL_ID}/health", body)
+    except Exception as exc:
+        print(f"health update failed: {type(exc).__name__}", file=sys.stderr, flush=True)
 
 
 def keychain(service: str) -> str:
@@ -241,14 +269,28 @@ def send_reply(cfg: dict[str, Any], reply: dict[str, Any]) -> None:
             smtp.close()
 
 
+def delivery_uncertain(exc: Exception) -> bool:
+    """SMTP transport loss can occur after DATA was accepted."""
+    return isinstance(exc, (smtplib.SMTPServerDisconnected, TimeoutError, OSError))
+
+
 def deliver(client: TermiteClient, cfg: dict[str, Any], reply: dict[str, Any]) -> None:
+    client.request(f"/v1/channel-replies/{reply['id']}/attempt", {})
     try:
         send_reply(cfg, reply)
     except Exception as exc:
-        client.request(f"/v1/channel-replies/{reply['id']}/ack", {
-            "delivered": False, "error": f"SMTP delivery failed: {exc}"[:512]
-        })
+        message = bounded(f"SMTP delivery failed: {exc}", 512)
+        report_health(client, "degraded", error=message, detail="SMTP delivery failed")
+        if delivery_uncertain(exc):
+            client.request(f"/v1/channel-replies/{reply['id']}/ack", {
+                "state": "verification-needed", "error": message
+            })
+        else:
+            client.request(f"/v1/channel-replies/{reply['id']}/ack", {
+                "delivered": False, "error": message
+            })
         return
+    report_health(client, "healthy", detail="SMTP delivery accepted")
     client.request(f"/v1/channel-replies/{reply['id']}/ack", {"delivered": True})
 
 
@@ -295,9 +337,12 @@ def main() -> None:
             poll_mailbox(client, cfg)
             failures = 0
             delay = cfg["poll_seconds"]
+            report_health(client, "healthy", detail="IMAP poll succeeded")
         except Exception as exc:
             failures += 1
             delay = min(cfg["poll_seconds"] * (2 ** min(failures, 5)), 3600)
+            report_health(client, "retrying", error=f"IMAP poll failed: {exc}",
+                          retry_in=delay, detail="IMAP poll will retry")
             print(f"IMAP poll failed: {exc}; retrying in {delay}s", file=sys.stderr, flush=True)
 
 

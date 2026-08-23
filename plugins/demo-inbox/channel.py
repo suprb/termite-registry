@@ -3,6 +3,7 @@
 
 import json
 import os
+import time
 import urllib.request
 
 
@@ -28,6 +29,7 @@ def request(path, body=None):
 def deliver(reply):
     # A real connector calls its provider's send-message API here. Printing is
     # the Demo provider, so acknowledging after the write is truthful.
+    request(f"/v1/channel-replies/{reply['id']}/attempt", {})
     print(f"outbound [{reply['conversationID']}]: {reply['body']}", flush=True)
     request(f"/v1/channel-replies/{reply['id']}/ack", {"delivered": True})
 
@@ -52,6 +54,12 @@ request(f"/v1/channels/{CHANNEL_ID}/work-items", {
     "senderName": "Demo Channel",
     "title": "Try the Work Inbox",
     "body": "Open Channels > Work Inbox. Start an agent, stage a shell command, or reply.",
+})
+
+request(f"/v1/channels/{CHANNEL_ID}/health", {
+    "status": "healthy",
+    "lastSuccessAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    "detail": "Local Demo provider is ready",
 })
 
 stream = urllib.request.Request(BASE_URL + "/v1/events", headers=HEADERS)

@@ -12,3 +12,5 @@ jobs:
         run: python3 tools/validate.py
       - name: Test first-party Channel connectors offline
         run: python3 tools/test-channels.py
+      - name: Integrate first-party Channels against loopback probes
+        run: python3 tools/test-channel-integrations.py

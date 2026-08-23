@@ -24,9 +24,13 @@ KEYCHAIN_SERVICE = "termite.linear"
 LINEAR_API = "https://api.linear.app/graphql"
 MAX_HTTP_BYTES = 8 * 1024 * 1024
 MAX_SSE_LINE_BYTES = 256 * 1024
+HEALTH_STATUSES = {"healthy", "degraded", "retrying", "offline"}
+HEALTH_FIELD_BYTES = {"lastSuccessAt": 128, "lastErrorAt": 128, "error": 1024,
+                      "nextRetryAt": 128, "detail": 2048}
 
 
 class ConnectorError(RuntimeError): pass
+class UncertainDeliveryError(ConnectorError): pass
 
 
 class RejectRedirects(urllib.request.HTTPRedirectHandler):
@@ -41,6 +45,9 @@ def read_json(response, source):
     if len(payload) > MAX_HTTP_BYTES: raise ConnectorError(f"{source} response exceeded {MAX_HTTP_BYTES} bytes")
     try: return json.loads(payload) if payload else {}
     except json.JSONDecodeError as exc: raise ConnectorError(f"{source} returned invalid JSON") from exc
+
+
+def utf8_prefix(value, max_bytes): return str(value).encode("utf-8")[:max_bytes].decode("utf-8", "ignore")
 
 
 def truncate(text, limit=60000):
@@ -90,6 +97,7 @@ def parse_bool(value, name):
 
 
 def iso_time(value): return value.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+def iso_now(): return iso_time(datetime.now(timezone.utc))
 
 
 class TermiteClient:
@@ -109,8 +117,19 @@ class TermiteClient:
     def ingest(self, item): return self.request(f"/v1/channels/{CHANNEL_ID}/work-items", item)
     def acknowledge(self, reply_id, delivered, error=None):
         body = {"delivered": delivered}
-        if error: body["error"] = str(error)[:500]
+        if error: body["error"] = utf8_prefix(error, 1024)
         return self.request(f"/v1/channel-replies/{reply_id}/ack", body)
+    def begin_reply_attempt(self, reply_id): return self.request(f"/v1/channel-replies/{reply_id}/attempt", {})
+    def verification_needed(self, reply_id, error):
+        return self.request(f"/v1/channel-replies/{reply_id}/ack", {
+            "state": "verification-needed", "error": utf8_prefix(error, 1024)})
+    def report_health(self, status, **fields):
+        if status not in HEALTH_STATUSES: raise ConnectorError(f"invalid provider health status: {status}")
+        unknown = set(fields) - set(HEALTH_FIELD_BYTES)
+        if unknown: raise ConnectorError(f"invalid provider health field: {sorted(unknown)[0]}")
+        body = {"status": status}; body.update({key: utf8_prefix(value, HEALTH_FIELD_BYTES[key])
+                                                for key, value in fields.items() if value is not None})
+        return self.request(f"/v1/channels/{CHANNEL_ID}/health", body)
     def pending_replies(self): return self.request("/v1/channel-replies").get("replies", [])
     def reply_is_queued(self, reply_id):
         return any(str(reply.get("id", "")) == reply_id for reply in self.pending_replies())
@@ -137,7 +156,9 @@ class LinearClient:
             detail = "rate limited" if exc.code == 429 else "provider rejected request"
             raise ConnectorError(f"Linear HTTP {exc.code} ({detail})") from exc
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-            raise ConnectorError(f"Linear request failed: {type(exc).__name__}") from exc
+            error = f"Linear request failed: {type(exc).__name__}"
+            if "mutation Reply" in query: raise UncertainDeliveryError(error) from exc
+            raise ConnectorError(error) from exc
         if result.get("errors"):
             error = result["errors"][0]
             code = (error.get("extensions") or {}).get("code")
@@ -197,6 +218,9 @@ class LinearConnector:
         self.since = iso_time(datetime.now(timezone.utc) - timedelta(seconds=lookback))
         self.hints, self.viewer_id = hints or {}, ""
         self._delivering, self._lock = set(), threading.Lock()
+    def _health(self, status, **fields):
+        try: self.termite.report_health(status, **fields)
+        except Exception as exc: print(f"Linear health report failed: {exc}", file=sys.stderr)
     def allowed_scope(self, issue):
         team_id = str((issue.get("team") or {}).get("id", ""))
         project_id = str((issue.get("project") or {}).get("id", ""))
@@ -206,8 +230,12 @@ class LinearConnector:
                 and (not self.assigned_only or (self.viewer_id and assignee_id == self.viewer_id)))
     def poll_once(self):
         poll_started_at = datetime.now(timezone.utc)
-        issues = self.linear.issues(self.since, sorted(self.team_ids), sorted(self.project_ids),
-                                    self.viewer_id if self.assigned_only else "")
+        try:
+            issues = self.linear.issues(self.since, sorted(self.team_ids), sorted(self.project_ids),
+                                        self.viewer_id if self.assigned_only else "")
+        except Exception as exc:
+            self._health("retrying", error=str(exc), lastErrorAt=iso_now(), detail="Linear provider poll failed")
+            raise
         for issue in issues:
             if not self.allowed_scope(issue): continue
             issue_id, identifier = str(issue.get("id", "")), str(issue.get("identifier", ""))
@@ -225,6 +253,7 @@ class LinearConnector:
         # Advance only to the beginning of the completed query. An issue updated
         # while pages are being read must remain inside the next overlap window.
         self.since = iso_time(poll_started_at - timedelta(seconds=2))
+        self._health("healthy", lastSuccessAt=iso_now(), detail="Linear poll completed")
     def deliver(self, reply):
         reply_id, issue_id = str(reply.get("id", "")), str(reply.get("conversationID", ""))
         if not reply_id or not issue_id: return
@@ -242,9 +271,18 @@ class LinearConnector:
                 marker = self.linear.marker(reply_id)
                 comments = ((issue.get("comments") or {}).get("nodes") or [])
                 if not any(f"<!-- {marker} -->" in str(comment.get("body", "")) for comment in comments):
+                    try: self.termite.begin_reply_attempt(reply_id)
+                    except Exception: return
                     self.linear.send_comment(issue_id, reply["body"], reply_id)
-            except Exception as exc: self.termite.acknowledge(reply_id, False, str(exc))
-            else: self.termite.acknowledge(reply_id, True)
+            except UncertainDeliveryError as exc:
+                self._health("degraded", error=str(exc), lastErrorAt=iso_now(), detail="Linear delivery needs verification")
+                self.termite.verification_needed(reply_id, str(exc))
+            except Exception as exc:
+                self._health("degraded", error=str(exc), lastErrorAt=iso_now(), detail="Linear delivery failed")
+                self.termite.acknowledge(reply_id, False, str(exc))
+            else:
+                self._health("healthy", lastSuccessAt=iso_now(), detail="Linear delivery completed")
+                self.termite.acknowledge(reply_id, True)
         finally:
             with self._lock: self._delivering.discard(reply_id)
     def listen(self):
@@ -258,8 +296,12 @@ class LinearConnector:
                 print(f"Termite event stream disconnected: {exc}; retrying", file=sys.stderr)
                 time.sleep(delay); delay = min(delay * 2, 30)
     def run(self):
-        self.viewer_id, detected = self.linear.identity()
+        try: self.viewer_id, detected = self.linear.identity()
+        except Exception as exc:
+            self._health("offline", error=str(exc), lastErrorAt=iso_now(), detail="Linear identity failed")
+            raise
         registration = self.termite.register(self.account or detected)
+        self._health("healthy", lastSuccessAt=iso_now(), detail="Linear identity verified")
         for reply in registration.get("pendingReplies", []): self.deliver(reply)
         threading.Thread(target=self.listen, name="termite-events", daemon=True).start()
         delay = 1

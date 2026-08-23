@@ -10,6 +10,23 @@ channel = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(channel)
 
 
+class FakeAPI:
+    def __init__(self):
+        self.attempts, self.acks, self.verifications, self.health = [], [], [], []
+
+    def begin_attempt(self, reply_id):
+        self.attempts.append(reply_id)
+
+    def ack(self, *args):
+        self.acks.append(args)
+
+    def verification_needed(self, reply_id, error):
+        self.verifications.append((reply_id, error))
+
+    def report_health(self, status, **fields):
+        self.health.append((status, fields))
+
+
 class IMessageTests(unittest.TestCase):
     def test_requires_opt_in_and_an_allowlist(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -73,6 +90,29 @@ class IMessageTests(unittest.TestCase):
         config = {"allowedHandles": ["friend@example.test"], "allowedChatGUIDs": []}
         with self.assertRaisesRegex(ValueError, "no longer allowlisted"):
             channel.resolve_address("handle:attacker@example.test", config)
+
+    def test_reply_attempt_precedes_messages_send(self):
+        api, calls = FakeAPI(), []
+        connector = channel.Connector(
+            api, None, {}, lambda reply, _config: calls.append(reply["id"]))
+        connector.deliver({"id": "r1", "channel": channel.CHANNEL_ID, "body": "done"})
+        self.assertEqual(api.attempts, ["r1"])
+        self.assertEqual(calls, ["r1"])
+        self.assertEqual(api.acks, [("r1", True)])
+        self.assertEqual(api.health[-1][0], "healthy")
+
+    def test_uncertain_apple_event_needs_verification(self):
+        api = FakeAPI()
+
+        def uncertain(_reply, _config):
+            raise TimeoutError("Messages reply unknown")
+
+        connector = channel.Connector(api, None, {}, uncertain)
+        connector.deliver({"id": "r2", "channel": channel.CHANNEL_ID, "body": "done"})
+        self.assertEqual(api.attempts, ["r2"])
+        self.assertEqual(api.acks, [])
+        self.assertEqual(api.verifications[0][0], "r2")
+        self.assertEqual(api.health[-1][0], "degraded")
 
     def test_failed_ingest_does_not_advance_cursor(self):
         class Source:

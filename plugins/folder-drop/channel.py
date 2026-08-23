@@ -2,6 +2,7 @@
 """Folder Drop: files in, user-approved JSON replies out."""
 
 from collections import deque
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import hashlib
 import json
@@ -34,6 +35,11 @@ def utf8_prefix(value, max_bytes):
 def field(value, default, max_bytes):
     text = str(value) if value is not None else ""
     return utf8_prefix(text if text.strip() else default, max_bytes)
+
+
+def iso_now(offset_seconds=0):
+    value = datetime.now(timezone.utc) + timedelta(seconds=max(0, offset_seconds))
+    return value.isoformat().replace("+00:00", "Z")
 
 
 def read_regular_file(path, max_bytes, dir_fd=None):
@@ -112,6 +118,27 @@ class TermiteAPI:
             body["error"] = error[:1024]
         rid = urllib.parse.quote(str(reply_id), safe="")
         return self.request(f"/v1/channel-replies/{rid}/ack", body)
+
+    def begin_attempt(self, reply_id):
+        rid = urllib.parse.quote(str(reply_id), safe="")
+        return self.request(f"/v1/channel-replies/{rid}/attempt", {})
+
+    def verification_needed(self, reply_id, error):
+        rid = urllib.parse.quote(str(reply_id), safe="")
+        return self.request(f"/v1/channel-replies/{rid}/ack", {
+            "state": "verification-needed", "error": utf8_prefix(error, 1024),
+        })
+
+    def report_health(self, status, detail="", error="", retry_in=None):
+        body = {"status": status, "detail": utf8_prefix(detail, 4096)}
+        if status == "healthy":
+            body["lastSuccessAt"] = iso_now()
+        if error:
+            body["error"] = utf8_prefix(error, 4096)
+            body["lastErrorAt"] = iso_now()
+        if retry_in is not None:
+            body["nextRetryAt"] = iso_now(retry_in)
+        return self.request(f"/v1/channels/{CHANNEL_ID}/health", body)
 
     def events(self):
         return urllib.request.urlopen(
@@ -231,14 +258,25 @@ class Connector:
             self.seen.discard(self.seen_order.popleft())
         return True
 
+    def health(self, status, **fields):
+        try:
+            self.api.report_health(status, **fields)
+        except Exception as exc:
+            print(f"Folder Drop health update failed: {exc}", flush=True)
+
     def deliver(self, reply):
         if reply.get("channel") not in (None, CHANNEL_ID):
             return
+        self.api.begin_attempt(reply["id"])
         try:
             write_reply(self.config["outbox"], reply)
         except Exception as exc:
-            self.api.ack(reply["id"], False, f"folder outbox failed: {exc}")
+            message = f"folder outbox delivery is ambiguous: {exc}"
+            self.health("degraded", error=message,
+                        detail="Outbox delivery needs user verification")
+            self.api.verification_needed(reply["id"], message)
         else:
+            self.health("healthy", detail="Approved reply is durable in the outbox")
             self.api.ack(reply["id"], True)
 
     def recover(self):
@@ -281,6 +319,7 @@ class Connector:
                 # Let host/network failures reach the outer exponential backoff.
                 self.api.request(f"/v1/channels/{CHANNEL_ID}/work-items", item)
                 self.remember(item["deliveryID"])
+        self.health("healthy", detail="Folder inbox scan completed")
 
 
 def main():
@@ -311,6 +350,8 @@ def main():
             delay = config["pollIntervalSeconds"]
         except Exception as exc:
             print(f"Folder Drop poll: {exc}; retrying in {delay:g}s", flush=True)
+            connector.health("retrying", error=str(exc), retry_in=delay,
+                             detail="Folder inbox scan failed")
             delay = min(delay * 2, 60.0)
         time.sleep(delay)
 

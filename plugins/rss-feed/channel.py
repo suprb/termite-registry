@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from html import unescape
 from html.parser import HTMLParser
@@ -24,6 +24,8 @@ import xml.etree.ElementTree as ET
 PLUGIN_DIR = Path(__file__).resolve().parent
 CHANNEL_ID = "dev.termite.rss-feed.inbox"
 MAX_DOWNLOAD = 2 * 1024 * 1024
+_last_success_at: str | None = None
+_last_error_at: str | None = None
 
 
 def origin(url: str) -> tuple[str, str, int | None]:
@@ -62,6 +64,31 @@ def plain_text(value: str, limit: int = 65536) -> str:
 
 def bounded(value: str, limit: int) -> str:
     return value.encode("utf-8")[:limit].decode("utf-8", "ignore")
+
+
+def report_health(client: Any, status: str, *, error: str = "",
+                  retry_in: int | None = None, detail: str = "") -> None:
+    global _last_success_at, _last_error_at
+    now = datetime.now(timezone.utc)
+    if status == "healthy":
+        _last_success_at = now.isoformat().replace("+00:00", "Z")
+    if error:
+        _last_error_at = now.isoformat().replace("+00:00", "Z")
+    body: dict[str, Any] = {"status": status}
+    if _last_success_at:
+        body["lastSuccessAt"] = _last_success_at
+    if _last_error_at:
+        body["lastErrorAt"] = _last_error_at
+    if error:
+        body["error"] = bounded(error, 1024)
+    if retry_in is not None:
+        body["nextRetryAt"] = (now + timedelta(seconds=max(0, retry_in))).isoformat().replace("+00:00", "Z")
+    if detail:
+        body["detail"] = bounded(detail, 2048)
+    try:
+        client.post(f"/v1/channels/{CHANNEL_ID}/health", body)
+    except Exception as exc:
+        print(f"health update failed: {type(exc).__name__}", file=sys.stderr, flush=True)
 
 
 def safe_url_label(url: str) -> str:
@@ -252,6 +279,7 @@ def main() -> None:
         if delay:
             time.sleep(delay)
         failed = False
+        errors: list[str] = []
         for url in cfg["feed_urls"]:
             try:
                 data, validators[url] = fetch(url, cfg, validators[url])
@@ -260,9 +288,15 @@ def main() -> None:
                         client.post(f"/v1/channels/{CHANNEL_ID}/work-items", item)
             except Exception as exc:
                 failed = True
+                errors.append(f"{safe_url_label(url)}: {type(exc).__name__}")
                 print(f"feed {safe_url_label(url)} failed: {exc}", file=sys.stderr, flush=True)
         failures = failures + 1 if failed else 0
         delay = min(cfg["poll_seconds"] * (2 ** min(failures, 5)), 3600)
+        if failed:
+            report_health(client, "retrying", error="; ".join(errors), retry_in=delay,
+                          detail="One or more feeds failed; successful feeds were still imported")
+        else:
+            report_health(client, "healthy", detail=f"Polled {len(cfg['feed_urls'])} feed(s)")
 
 
 if __name__ == "__main__":

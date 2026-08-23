@@ -3,7 +3,7 @@
 
 from pathlib import Path
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
@@ -61,6 +61,11 @@ def as_bool(value):
 
 def utf8_prefix(value, max_bytes):
     return str(value).encode("utf-8")[:max_bytes].decode("utf-8", "ignore")
+
+
+def iso_now(offset_seconds=0):
+    value = datetime.now(timezone.utc) + timedelta(seconds=max(0, offset_seconds))
+    return value.isoformat().replace("+00:00", "Z")
 
 
 def string_list(value, name):
@@ -312,6 +317,27 @@ class TermiteAPI:
         rid = urllib.parse.quote(str(reply_id), safe="")
         return self.request(f"/v1/channel-replies/{rid}/ack", body)
 
+    def begin_attempt(self, reply_id):
+        rid = urllib.parse.quote(str(reply_id), safe="")
+        return self.request(f"/v1/channel-replies/{rid}/attempt", {})
+
+    def verification_needed(self, reply_id, error):
+        rid = urllib.parse.quote(str(reply_id), safe="")
+        return self.request(f"/v1/channel-replies/{rid}/ack", {
+            "state": "verification-needed", "error": utf8_prefix(error, 1024),
+        })
+
+    def report_health(self, status, detail="", error="", retry_in=None):
+        body = {"status": status, "detail": utf8_prefix(detail, 4096)}
+        if status == "healthy":
+            body["lastSuccessAt"] = iso_now()
+        if error:
+            body["error"] = utf8_prefix(error, 4096)
+            body["lastErrorAt"] = iso_now()
+        if retry_in is not None:
+            body["nextRetryAt"] = iso_now(retry_in)
+        return self.request(f"/v1/channels/{CHANNEL_ID}/health", body)
+
     def events(self):
         return urllib.request.urlopen(
             urllib.request.Request(self.base + "/v1/events", headers=self.headers), timeout=65
@@ -323,12 +349,19 @@ class Connector:
         self.api, self.source, self.config, self.sender = api, source, config, sender
         self.cursor, self.initialized = 0, False
 
+    def health(self, status, **fields):
+        try:
+            self.api.report_health(status, **fields)
+        except Exception as exc:
+            print(f"iMessage health update failed: {exc}", flush=True)
+
     def poll_once(self):
         if not self.initialized:
             boundary = self.source.boundary()
             if not self.config["includeExistingMessages"]:
                 self.cursor = boundary
                 self.initialized = True
+                self.health("healthy", detail="Messages database baseline completed")
                 return []
             rows = self.source.rows(0, self.config["maxMessagesPerPoll"], boundary, newest=True)
             initial_boundary = boundary
@@ -350,16 +383,22 @@ class Connector:
             # bounded page, then baselines the rest once every POST succeeds.
             self.cursor = initial_boundary
         self.initialized = True
+        self.health("healthy", detail="Messages database poll completed")
         return submitted
 
     def deliver(self, reply):
         if reply.get("channel") not in (None, CHANNEL_ID):
             return
+        self.api.begin_attempt(reply["id"])
         try:
             self.sender(reply, self.config)
         except Exception as exc:
-            self.api.ack(reply["id"], False, f"Messages send failed: {exc}")
+            message = f"Messages Apple Event result is ambiguous: {exc}"
+            self.health("degraded", error=message,
+                        detail="iMessage delivery needs user verification")
+            self.api.verification_needed(reply["id"], message)
         else:
+            self.health("healthy", detail="Messages accepted the approved reply")
             self.api.ack(reply["id"], True)
 
     def recover(self):
@@ -385,6 +424,8 @@ class Connector:
                                 self.deliver(event)
             except Exception as exc:
                 print(f"iMessage reply stream: {exc}; retrying in {delay:g}s", flush=True)
+                self.health("retrying", error=str(exc), retry_in=delay,
+                            detail="iMessage reply stream disconnected")
                 time.sleep(delay)
                 delay = min(delay * 2, 30.0)
 
@@ -421,6 +462,8 @@ def main():
             delay = config["pollIntervalSeconds"]
         except Exception as exc:
             print(f"iMessage poll: {exc}; retrying in {delay:g}s", flush=True)
+            connector.health("retrying", error=str(exc), retry_in=delay,
+                             detail="Messages database poll failed")
             delay = min(delay * 2, 60.0)
         time.sleep(delay)
 

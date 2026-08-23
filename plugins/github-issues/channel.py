@@ -26,9 +26,13 @@ GITHUB_API = "https://api.github.com"
 REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 MAX_HTTP_BYTES = 8 * 1024 * 1024
 MAX_SSE_LINE_BYTES = 256 * 1024
+HEALTH_STATUSES = {"healthy", "degraded", "retrying", "offline"}
+HEALTH_FIELD_BYTES = {"lastSuccessAt": 128, "lastErrorAt": 128, "error": 1024,
+                      "nextRetryAt": 128, "detail": 2048}
 
 
 class ConnectorError(RuntimeError): pass
+class UncertainDeliveryError(ConnectorError): pass
 
 
 class RejectRedirects(urllib.request.HTTPRedirectHandler):
@@ -43,6 +47,9 @@ def read_json(response, source):
     if len(payload) > MAX_HTTP_BYTES: raise ConnectorError(f"{source} response exceeded {MAX_HTTP_BYTES} bytes")
     try: return json.loads(payload) if payload else {}
     except json.JSONDecodeError as exc: raise ConnectorError(f"{source} returned invalid JSON") from exc
+
+
+def utf8_prefix(value, max_bytes): return str(value).encode("utf-8")[:max_bytes].decode("utf-8", "ignore")
 
 
 def truncate(text, limit=60000):
@@ -97,6 +104,7 @@ def parse_time(value):
 
 def iso_time(value):
     return value.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+def iso_now(): return iso_time(datetime.now(timezone.utc))
 
 
 def ignored_actor(user, own_login=""):
@@ -123,8 +131,19 @@ class TermiteClient:
     def ingest(self, item): return self.request(f"/v1/channels/{CHANNEL_ID}/work-items", item)
     def acknowledge(self, reply_id, delivered, error=None):
         body = {"delivered": delivered}
-        if error: body["error"] = str(error)[:500]
+        if error: body["error"] = utf8_prefix(error, 1024)
         return self.request(f"/v1/channel-replies/{reply_id}/ack", body)
+    def begin_reply_attempt(self, reply_id): return self.request(f"/v1/channel-replies/{reply_id}/attempt", {})
+    def verification_needed(self, reply_id, error):
+        return self.request(f"/v1/channel-replies/{reply_id}/ack", {
+            "state": "verification-needed", "error": utf8_prefix(error, 1024)})
+    def report_health(self, status, **fields):
+        if status not in HEALTH_STATUSES: raise ConnectorError(f"invalid provider health status: {status}")
+        unknown = set(fields) - set(HEALTH_FIELD_BYTES)
+        if unknown: raise ConnectorError(f"invalid provider health field: {sorted(unknown)[0]}")
+        body = {"status": status}; body.update({key: utf8_prefix(value, HEALTH_FIELD_BYTES[key])
+                                                for key, value in fields.items() if value is not None})
+        return self.request(f"/v1/channels/{CHANNEL_ID}/health", body)
     def pending_replies(self): return self.request("/v1/channel-replies").get("replies", [])
     def reply_is_queued(self, reply_id):
         return any(str(reply.get("id", "")) == reply_id for reply in self.pending_replies())
@@ -157,7 +176,9 @@ class GitHubClient:
             detail = "permission or rate limit" if exc.code in {403, 429} else "provider rejected request"
             raise ConnectorError(f"GitHub HTTP {exc.code} ({detail})") from exc
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-            raise ConnectorError(f"GitHub request failed: {type(exc).__name__}") from exc
+            error = f"GitHub request failed: {type(exc).__name__}"
+            if method == "POST" and path.endswith("/comments"): raise UncertainDeliveryError(error) from exc
+            raise ConnectorError(error) from exc
     def identity(self):
         user = self.call("GET", "/user")
         return str(user.get("id", "")), user.get("login") or "GitHub user"
@@ -220,6 +241,9 @@ class GitHubConnector:
         self.since = {repo: iso_time(start) for repo in repositories}
         self.project_hints = project_hints or {}; self.own_login = ""
         self._delivering, self._lock = set(), threading.Lock()
+    def _health(self, status, **fields):
+        try: self.termite.report_health(status, **fields)
+        except Exception as exc: print(f"GitHub health report failed: {exc}", file=sys.stderr)
     def base_item(self, repository, number, sender, sender_id, created_at):
         item = {"conversationID": repository, "replyToID": str(number), "senderID": str(sender_id or ""),
                 "senderName": truncate(sender, 256), "createdAt": created_at}
@@ -230,7 +254,11 @@ class GitHubConnector:
         for repository in self.repositories:
             newest = parse_time(self.since[repository])
             if self.include_issues:
-                for issue in self.github.issues(repository, self.since[repository]):
+                try: issues = self.github.issues(repository, self.since[repository])
+                except Exception as exc:
+                    self._health("retrying", error=str(exc), lastErrorAt=iso_now(), detail="GitHub provider poll failed")
+                    raise
+                for issue in issues:
                     if "pull_request" in issue: continue
                     updated = issue.get("updated_at")
                     if updated: newest = max(newest, parse_time(updated))
@@ -244,7 +272,11 @@ class GitHubConnector:
                         "body": truncate(issue.get("body") or issue.get("title") or "(empty issue)")})
                     self.termite.ingest(item)
             if self.include_comments:
-                for comment in self.github.comments(repository, self.since[repository]):
+                try: comments = self.github.comments(repository, self.since[repository])
+                except Exception as exc:
+                    self._health("retrying", error=str(exc), lastErrorAt=iso_now(), detail="GitHub provider poll failed")
+                    raise
+                for comment in comments:
                     updated = comment.get("updated_at")
                     if updated: newest = max(newest, parse_time(updated))
                     user = comment.get("user") or {}; sender = user.get("login") or "GitHub user"
@@ -258,6 +290,7 @@ class GitHubConnector:
                         "body": truncate(comment.get("body") or "(empty comment)")})
                     self.termite.ingest(item)
             self.since[repository] = iso_time(newest - timedelta(seconds=2))
+        self._health("healthy", lastSuccessAt=iso_now(), detail="GitHub poll completed")
     def deliver(self, reply):
         reply_id = str(reply.get("id", ""))
         if not reply_id: return
@@ -271,9 +304,18 @@ class GitHubConnector:
                 return
             if reply.get("conversationID") not in self.repositories:
                 self.termite.acknowledge(reply_id, False, "repository is not in this connector's allowlist"); return
+            try: self.termite.begin_reply_attempt(reply_id)
+            except Exception: return
             try: self.github.send(reply)
-            except Exception as exc: self.termite.acknowledge(reply_id, False, str(exc))
-            else: self.termite.acknowledge(reply_id, True)
+            except UncertainDeliveryError as exc:
+                self._health("degraded", error=str(exc), lastErrorAt=iso_now(), detail="GitHub delivery needs verification")
+                self.termite.verification_needed(reply_id, str(exc))
+            except Exception as exc:
+                self._health("degraded", error=str(exc), lastErrorAt=iso_now(), detail="GitHub delivery failed")
+                self.termite.acknowledge(reply_id, False, str(exc))
+            else:
+                self._health("healthy", lastSuccessAt=iso_now(), detail="GitHub delivery completed")
+                self.termite.acknowledge(reply_id, True)
         finally:
             with self._lock: self._delivering.discard(reply_id)
     def listen(self):
@@ -287,8 +329,12 @@ class GitHubConnector:
                 print(f"Termite event stream disconnected: {exc}; retrying", file=sys.stderr)
                 time.sleep(delay); delay = min(delay * 2, 30)
     def run(self):
-        _, detected = self.github.identity(); self.own_login = detected
+        try: _, detected = self.github.identity(); self.own_login = detected
+        except Exception as exc:
+            self._health("offline", error=str(exc), lastErrorAt=iso_now(), detail="GitHub identity failed")
+            raise
         registration = self.termite.register(self.account or detected)
+        self._health("healthy", lastSuccessAt=iso_now(), detail="GitHub identity verified")
         for reply in registration.get("pendingReplies", []): self.deliver(reply)
         threading.Thread(target=self.listen, name="termite-events", daemon=True).start()
         delay = 1

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
@@ -20,10 +21,43 @@ import urllib.request
 PLUGIN_DIR = Path(__file__).resolve().parent
 CHANNEL_ID = "dev.termite.matrix.rooms"
 MAX_SYNC_BYTES = 4 * 1024 * 1024
+_last_success_at: str | None = None
+_last_error_at: str | None = None
 
 
 def bounded(value: Any, limit: int) -> str:
     return str(value).encode("utf-8")[:limit].decode("utf-8", "ignore")
+
+
+def delivery_uncertain(exc: Exception) -> bool:
+    return not isinstance(exc, urllib.error.HTTPError) and isinstance(
+        exc, (urllib.error.URLError, TimeoutError, OSError)
+    )
+
+
+def report_health(client: Any, status: str, *, error: str = "",
+                  retry_in: int | None = None, detail: str = "") -> None:
+    global _last_success_at, _last_error_at
+    now = datetime.now(timezone.utc)
+    if status == "healthy":
+        _last_success_at = now.isoformat().replace("+00:00", "Z")
+    if error:
+        _last_error_at = now.isoformat().replace("+00:00", "Z")
+    body: dict[str, Any] = {"status": status}
+    if _last_success_at:
+        body["lastSuccessAt"] = _last_success_at
+    if _last_error_at:
+        body["lastErrorAt"] = _last_error_at
+    if error:
+        body["error"] = bounded(error, 1024)
+    if retry_in is not None:
+        body["nextRetryAt"] = (now + timedelta(seconds=max(0, retry_in))).isoformat().replace("+00:00", "Z")
+    if detail:
+        body["detail"] = bounded(detail, 2048)
+    try:
+        client.request(f"/v1/channels/{CHANNEL_ID}/health", body)
+    except Exception as exc:
+        print(f"health update failed: {type(exc).__name__}", file=sys.stderr, flush=True)
 
 
 def origin(url: str) -> tuple[str, str, int | None]:
@@ -173,9 +207,8 @@ class MatrixAPI:
         req = urllib.request.Request(self.cfg["homeserver"] + path, data=json.dumps(content).encode(),
                                      headers=headers, method="PUT")
         with HTTP.open(req, timeout=30) as response:
-            raw = response.read(65537)
-        if len(raw) > 65536:
-            raise ValueError("Matrix send response exceeds 64 KiB")
+            # A 2xx response establishes acceptance; its body is not required.
+            response.read(65537)
 
 
 def work_items(sync: dict[str, Any], allowed: set[str], own_user: str) -> list[dict[str, Any]]:
@@ -229,13 +262,22 @@ def save_since(path: str, token: str) -> None:
 
 
 def deliver(client: TermiteClient, api: MatrixAPI, reply: dict[str, Any]) -> None:
+    client.request(f"/v1/channel-replies/{reply['id']}/attempt", {})
     try:
         api.reply(reply)
     except Exception as exc:
-        client.request(f"/v1/channel-replies/{reply['id']}/ack", {
-            "delivered": False, "error": f"Matrix delivery failed: {exc}"[:512]
-        })
+        message = bounded(f"Matrix delivery failed: {exc}", 512)
+        report_health(client, "degraded", error=message, detail="Matrix reply failed")
+        if delivery_uncertain(exc):
+            client.request(f"/v1/channel-replies/{reply['id']}/ack", {
+                "state": "verification-needed", "error": message
+            })
+        else:
+            client.request(f"/v1/channel-replies/{reply['id']}/ack", {
+                "delivered": False, "error": message
+            })
         return
+    report_health(client, "healthy", detail="Matrix reply accepted")
     client.request(f"/v1/channel-replies/{reply['id']}/ack", {"delivered": True})
 
 
@@ -272,6 +314,7 @@ def main() -> None:
         "account": cfg["account"], "description": f"Messages from {len(cfg['room_ids'])} allowlisted room(s)",
         "replyCapabilities": ["reply"],
     })
+    report_health(client, "healthy", detail="Matrix credentials verified")
     for pending in registration.get("pendingReplies", []):
         deliver(client, api, pending)
     threading.Thread(target=reply_loop, args=(client, api), daemon=True).start()
@@ -285,9 +328,12 @@ def main() -> None:
             since = str(response["next_batch"])
             save_since(cfg["state_file"], since)
             failures = 0
+            report_health(client, "healthy", detail="Matrix sync succeeded")
         except Exception as exc:
             failures += 1
             delay = min(2 ** min(failures, 6), 60)
+            report_health(client, "retrying", error=f"Matrix sync failed: {exc}",
+                          retry_in=delay, detail="Matrix sync will retry")
             print(f"Matrix sync failed: {exc}; retrying in {delay}s", file=sys.stderr, flush=True)
             time.sleep(delay)
 

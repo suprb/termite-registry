@@ -47,6 +47,17 @@ class FeedTests(unittest.TestCase):
         label = channel.safe_url_label("https://feeds.test/private?token=do-not-log")
         self.assertEqual(label, "https://feeds.test/private")
 
+    def test_read_only_health_reports_are_bounded(self):
+        client = mock.Mock()
+        channel.report_health(client, "retrying", error="x" * 5000, retry_in=30,
+                              detail="A feed poll will retry")
+        path, body = client.post.call_args.args
+        self.assertEqual(path, f"/v1/channels/{channel.CHANNEL_ID}/health")
+        self.assertEqual(body["status"], "retrying")
+        self.assertLessEqual(len(body["error"].encode()), 1024)
+        self.assertIn("lastErrorAt", body)
+        self.assertIn("nextRetryAt", body)
+
 
 if __name__ == "__main__":
     unittest.main()

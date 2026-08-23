@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import secrets
 import subprocess
@@ -21,10 +22,38 @@ from typing import Any
 
 PLUGIN_DIR = Path(__file__).resolve().parent
 CHANNEL_ID = "dev.termite.webhook-inbox.inbox"
+_last_success_at: str | None = None
+_last_error_at: str | None = None
 
 
 def bounded(value: Any, limit: int) -> str:
     return str(value).encode("utf-8")[:limit].decode("utf-8", "ignore")
+
+
+def report_health(client: Any, status: str, *, error: str = "",
+                  retry_in: int | None = None, detail: str = "") -> None:
+    """Best-effort provider health; telemetry must never block connector work."""
+    global _last_success_at, _last_error_at
+    now = datetime.now(timezone.utc)
+    if status == "healthy":
+        _last_success_at = now.isoformat().replace("+00:00", "Z")
+    if error:
+        _last_error_at = now.isoformat().replace("+00:00", "Z")
+    body: dict[str, Any] = {"status": status}
+    if _last_success_at:
+        body["lastSuccessAt"] = _last_success_at
+    if _last_error_at:
+        body["lastErrorAt"] = _last_error_at
+    if error:
+        body["error"] = bounded(error, 1024)
+    if retry_in is not None:
+        body["nextRetryAt"] = (now + timedelta(seconds=max(0, retry_in))).isoformat().replace("+00:00", "Z")
+    if detail:
+        body["detail"] = bounded(detail, 2048)
+    try:
+        client.request(f"/v1/channels/{CHANNEL_ID}/health", body)
+    except Exception as exc:
+        print(f"health update failed: {type(exc).__name__}", file=sys.stderr, flush=True)
 
 
 def origin(url: str) -> tuple[str, str, int | None]:
@@ -50,6 +79,13 @@ def provider_error(exc: Exception) -> str:
     if isinstance(exc, urllib.error.URLError):
         return "network error"
     return type(exc).__name__
+
+
+def delivery_uncertain(exc: Exception) -> bool:
+    """A transport failure after POST may hide provider acceptance."""
+    return not isinstance(exc, urllib.error.HTTPError) and isinstance(
+        exc, (urllib.error.URLError, TimeoutError, OSError)
+    )
 
 
 def _keychain(service: str) -> str:
@@ -98,6 +134,8 @@ def load_config() -> dict[str, Any]:
         cfg["inbound_secret"] = _keychain("termite.webhook-inbox")
     if not cfg["inbound_secret"]:
         raise ValueError("Set WEBHOOK_SECRET/inbound_secret or Keychain service termite.webhook-inbox")
+    if not cfg["callback_bearer_token"]:
+        cfg["callback_bearer_token"] = _keychain("termite.webhook-inbox.callback")
     if cfg["callback_url"]:
         parsed = urllib.parse.urlparse(str(cfg["callback_url"]))
         if not parsed.hostname or parsed.username or parsed.password:
@@ -178,18 +216,27 @@ def deliver_reply(client: TermiteClient, cfg: dict[str, Any], reply: dict[str, A
     headers = {"Content-Type": "application/json", "Idempotency-Key": reply["id"]}
     if cfg["callback_bearer_token"]:
         headers["Authorization"] = f"Bearer {cfg['callback_bearer_token']}"
+    client.request(f"/v1/channel-replies/{reply['id']}/attempt", {})
     try:
         request = urllib.request.Request(url, data=payload, headers=headers, method="POST")
         with HTTP.open(request, timeout=30) as response:
             if not 200 <= response.status < 300:
                 raise RuntimeError(f"callback returned HTTP {response.status}")
     except Exception as exc:
-        client.request(f"/v1/channel-replies/{reply['id']}/ack", {
-            "delivered": False, "error": f"Callback failed: {provider_error(exc)}"
-        })
+        message = f"Callback failed: {provider_error(exc)}"
+        report_health(client, "degraded", error=message, detail="Outbound callback failed")
+        if delivery_uncertain(exc):
+            client.request(f"/v1/channel-replies/{reply['id']}/ack", {
+                "state": "verification-needed", "error": message
+            })
+        else:
+            client.request(f"/v1/channel-replies/{reply['id']}/ack", {
+                "delivered": False, "error": message
+            })
         return
-    # Keep a failed host acknowledgement queued. Do not misreport an already
-    # accepted provider delivery as failed; recovery may deliver it at least once.
+    # Do not misreport an accepted provider delivery if the host ack fails. The
+    # host keeps the attempt in delivering until restart requires verification.
+    report_health(client, "healthy", detail="Outbound callback accepted")
     client.request(f"/v1/channel-replies/{reply['id']}/ack", {"delivered": True})
 
 
@@ -230,6 +277,7 @@ def make_handler(client: TermiteClient, cfg: dict[str, Any]):
                     raise ValueError("request JSON must be an object")
                 work = normalize_event(payload)
                 result = client.request(f"/v1/channels/{CHANNEL_ID}/work-items", work)
+                report_health(client, "healthy", detail="Webhook listener accepted an event")
                 self.reply(202, {"accepted": True, "id": result.get("id", work["id"])})
             except (ValueError, json.JSONDecodeError) as exc:
                 self.reply(400, {"error": str(exc)})
@@ -276,6 +324,7 @@ def main() -> None:
     if cfg["callback_url"]:
         threading.Thread(target=reply_loop, args=(client, cfg), daemon=True).start()
     server = ThreadingHTTPServer((cfg["listen_host"], cfg["listen_port"]), make_handler(client, cfg))
+    report_health(client, "healthy", detail="Webhook listener is ready")
     print(f"Webhook Inbox listening on http://{cfg['listen_host']}:{cfg['listen_port']}/events", flush=True)
     server.serve_forever()
 

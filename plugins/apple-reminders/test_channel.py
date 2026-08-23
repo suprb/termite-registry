@@ -12,12 +12,15 @@ SPEC.loader.exec_module(channel)
 
 class FakeAPI:
     def __init__(self):
-        self.items = []
+        self.items, self.health = [], []
 
     def request(self, path, body=None):
         if body:
             self.items.append(body)
         return {}
+
+    def report_health(self, status, **fields):
+        self.health.append((status, fields))
 
 
 class ReminderTests(unittest.TestCase):
@@ -70,6 +73,7 @@ class ReminderTests(unittest.TestCase):
         self.assertEqual(connector.poll_once(), [])
         self.assertEqual(source.calls, [0, 1])
         self.assertEqual(len(api.items), 1)
+        self.assertEqual([value[0] for value in api.health], ["healthy", "healthy"])
 
     def test_manifest_is_read_only(self):
         manifest = json.loads(Path(__file__).with_name("manifest.json").read_text())

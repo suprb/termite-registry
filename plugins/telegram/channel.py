@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 import stat
 import subprocess
@@ -21,10 +22,17 @@ KEYCHAIN_SERVICE = "termite.telegram"
 TELEGRAM_API_HOST = "https://api.telegram.org"
 MAX_HTTP_BYTES = 8 * 1024 * 1024
 MAX_SSE_LINE_BYTES = 256 * 1024
+HEALTH_STATUSES = {"healthy", "degraded", "retrying", "offline"}
+HEALTH_FIELD_BYTES = {"lastSuccessAt": 128, "lastErrorAt": 128, "error": 1024,
+                      "nextRetryAt": 128, "detail": 2048}
 
 
 class ConnectorError(RuntimeError):
     pass
+
+
+class UncertainDeliveryError(ConnectorError): pass
+def iso_now(): return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 class RejectRedirects(urllib.request.HTTPRedirectHandler):
@@ -39,6 +47,9 @@ def read_json(response, source):
     if len(payload) > MAX_HTTP_BYTES: raise ConnectorError(f"{source} response exceeded {MAX_HTTP_BYTES} bytes")
     try: return json.loads(payload) if payload else {}
     except json.JSONDecodeError as exc: raise ConnectorError(f"{source} returned invalid JSON") from exc
+
+
+def utf8_prefix(value, max_bytes): return str(value).encode("utf-8")[:max_bytes].decode("utf-8", "ignore")
 
 
 def truncate(text, limit=60000):
@@ -102,8 +113,19 @@ class TermiteClient:
     def ingest(self, item): return self.request(f"/v1/channels/{CHANNEL_ID}/work-items", item)
     def acknowledge(self, reply_id, delivered, error=None):
         body = {"delivered": delivered}
-        if error: body["error"] = str(error)[:500]
+        if error: body["error"] = utf8_prefix(error, 1024)
         return self.request(f"/v1/channel-replies/{reply_id}/ack", body)
+    def begin_reply_attempt(self, reply_id): return self.request(f"/v1/channel-replies/{reply_id}/attempt", {})
+    def verification_needed(self, reply_id, error):
+        return self.request(f"/v1/channel-replies/{reply_id}/ack", {
+            "state": "verification-needed", "error": utf8_prefix(error, 1024)})
+    def report_health(self, status, **fields):
+        if status not in HEALTH_STATUSES: raise ConnectorError(f"invalid provider health status: {status}")
+        unknown = set(fields) - set(HEALTH_FIELD_BYTES)
+        if unknown: raise ConnectorError(f"invalid provider health field: {sorted(unknown)[0]}")
+        body = {"status": status}; body.update({key: utf8_prefix(value, HEALTH_FIELD_BYTES[key])
+                                                for key, value in fields.items() if value is not None})
+        return self.request(f"/v1/channels/{CHANNEL_ID}/health", body)
     def pending_replies(self): return self.request("/v1/channel-replies").get("replies", [])
     def reply_is_queued(self, reply_id):
         return any(str(reply.get("id", "")) == reply_id for reply in self.pending_replies())
@@ -131,7 +153,9 @@ class TelegramClient:
                 result = read_json(response, "Telegram")
         except urllib.error.HTTPError as exc: raise ConnectorError(f"Telegram HTTP {exc.code}") from exc
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-            raise ConnectorError(f"Telegram request failed: {type(exc).__name__}") from exc
+            error = f"Telegram request failed: {type(exc).__name__}"
+            if method == "sendMessage": raise UncertainDeliveryError(error) from exc
+            raise ConnectorError(error) from exc
         if not result.get("ok"):
             raise ConnectorError(f"Telegram API rejected request: {result.get('description', 'unknown error')}")
         return result.get("result")
@@ -157,8 +181,15 @@ class TelegramConnector:
         self.allowed_chat_ids, self.account = allowed_chat_ids, account
         self.offset, self.own_user_id = None, ""
         self._delivering, self._lock = set(), threading.Lock()
+    def _health(self, status, **fields):
+        try: self.termite.report_health(status, **fields)
+        except Exception as exc: print(f"Telegram health report failed: {exc}", file=sys.stderr)
     def poll_once(self):
-        for update in sorted(self.telegram.updates(self.offset), key=lambda item: int(item.get("update_id", -1))):
+        try: updates = self.telegram.updates(self.offset)
+        except Exception as exc:
+            self._health("retrying", error=str(exc), lastErrorAt=iso_now(), detail="Telegram provider poll failed")
+            raise
+        for update in sorted(updates, key=lambda item: int(item.get("update_id", -1))):
             update_id = int(update.get("update_id", -1))
             if update_id < 0: continue
             message = update.get("message") or {}
@@ -180,6 +211,7 @@ class TelegramConnector:
                 "title": truncate(f"Telegram · {title} · {name}", 512), "body": truncate(text),
                 "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(message.get("date", 0))))})
             self.offset = max(self.offset or 0, update_id + 1)
+        self._health("healthy", lastSuccessAt=iso_now(), detail="Telegram poll completed")
     def deliver(self, reply):
         reply_id = str(reply.get("id", ""))
         if not reply_id: return
@@ -194,9 +226,18 @@ class TelegramConnector:
             if str(reply.get("conversationID", "")) not in self.allowed_chat_ids:
                 self.termite.acknowledge(reply_id, False, "Telegram reply targeted a chat outside this connector's allowlist")
                 return
+            try: self.termite.begin_reply_attempt(reply_id)
+            except Exception: return
             try: self.telegram.send(reply)
-            except Exception as exc: self.termite.acknowledge(reply_id, False, str(exc))
-            else: self.termite.acknowledge(reply_id, True)
+            except UncertainDeliveryError as exc:
+                self._health("degraded", error=str(exc), lastErrorAt=iso_now(), detail="Telegram delivery needs verification")
+                self.termite.verification_needed(reply_id, str(exc))
+            except Exception as exc:
+                self._health("degraded", error=str(exc), lastErrorAt=iso_now(), detail="Telegram delivery failed")
+                self.termite.acknowledge(reply_id, False, str(exc))
+            else:
+                self._health("healthy", lastSuccessAt=iso_now(), detail="Telegram delivery completed")
+                self.termite.acknowledge(reply_id, True)
         finally:
             with self._lock: self._delivering.discard(reply_id)
     def listen(self):
@@ -210,8 +251,12 @@ class TelegramConnector:
                 print(f"Termite event stream disconnected: {exc}; retrying", file=sys.stderr)
                 time.sleep(delay); delay = min(delay * 2, 30)
     def run(self):
-        self.own_user_id, detected = self.telegram.identity()
+        try: self.own_user_id, detected = self.telegram.identity()
+        except Exception as exc:
+            self._health("offline", error=str(exc), lastErrorAt=iso_now(), detail="Telegram identity failed")
+            raise
         registration = self.termite.register(self.account or detected)
+        self._health("healthy", lastSuccessAt=iso_now(), detail="Telegram identity verified")
         for reply in registration.get("pendingReplies", []): self.deliver(reply)
         threading.Thread(target=self.listen, name="termite-events", daemon=True).start()
         delay = 1

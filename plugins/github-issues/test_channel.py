@@ -1,16 +1,20 @@
 import io
 import unittest
 from unittest import mock
+import urllib.error
 import channel
 
 
 class FakeTermite:
-    def __init__(self): self.items, self.acks, self.queued = [], [], None
+    def __init__(self): self.items, self.acks, self.queued, self.attempts, self.health = [], [], None, [], []
     def ingest(self, item): self.items.append(item)
     def reply_is_queued(self, reply_id): return self.queued is None or reply_id in self.queued
     def acknowledge(self, *args):
         self.acks.append(args)
         if self.queued is not None: self.queued.discard(args[0])
+    def begin_reply_attempt(self, reply_id): self.attempts.append(reply_id)
+    def verification_needed(self, reply_id, error): self.acks.append((reply_id, "verification-needed", error))
+    def report_health(self, status, **fields): self.health.append((status, fields))
 class FakeGitHub:
     def __init__(self, issues=None, comments=None, error=None):
         self.issue_values, self.comment_values, self.error = issues or [], comments or [], error
@@ -43,6 +47,18 @@ class GitHubTests(unittest.TestCase):
         connector.poll_once()
         self.assertEqual([x["deliveryID"] for x in termite.items], ["github:issue:10", "github:comment:20"])
         self.assertEqual(termite.items[1]["replyToID"], "3")
+        self.assertEqual(termite.health[-1][0], "healthy")
+    def test_provider_poll_failure_reports_retrying(self):
+        termite = FakeTermite(); github = FakeGitHub(); github.issues = mock.Mock(side_effect=channel.ConnectorError("offline"))
+        connector = channel.GitHubConnector(termite, github, ["a/b"], "", 30, 10)
+        with self.assertRaises(channel.ConnectorError): connector.poll_once()
+        self.assertEqual(termite.health[-1][0], "retrying")
+    def test_event_stream_failure_does_not_change_provider_health(self):
+        termite = FakeTermite(); termite.events = mock.Mock(side_effect=channel.ConnectorError("Termite unavailable"))
+        connector = channel.GitHubConnector(termite, FakeGitHub(), ["a/b"], "", 30, 10)
+        with mock.patch.object(channel.time, "sleep", side_effect=RuntimeError("stop")):
+            with self.assertRaisesRegex(RuntimeError, "stop"): connector.listen()
+        self.assertEqual(termite.health, [])
     def test_self_and_bot_actors_are_filtered(self):
         issues = [
             {"id": 10, "number": 1, "title": "Self", "updated_at": "2026-01-01T00:01:00Z",
@@ -65,13 +81,29 @@ class GitHubTests(unittest.TestCase):
     def test_provider_failure_is_acknowledged(self):
         termite = FakeTermite(); connector = channel.GitHubConnector(termite, FakeGitHub(error="denied"), ["a/b"], "", 30, 10)
         connector.deliver({"id": "r2", "conversationID": "a/b", "replyToID": "1", "body": "done"})
+        self.assertEqual(termite.attempts, ["r2"])
         self.assertEqual(termite.acks, [("r2", False, "denied")])
+        self.assertEqual(termite.health[-1][0], "degraded")
+    def test_uncertain_delivery_requires_verification(self):
+        termite = FakeTermite(); github = FakeGitHub()
+        github.send = mock.Mock(side_effect=channel.UncertainDeliveryError("timeout after send"))
+        connector = channel.GitHubConnector(termite, github, ["a/b"], "", 30, 10)
+        connector.deliver({"id": "r1", "conversationID": "a/b", "replyToID": "1", "body": "done"})
+        self.assertEqual(termite.attempts, ["r1"])
+        self.assertEqual(termite.acks, [("r1", "verification-needed", "timeout after send")])
+        self.assertEqual(termite.health[-1][0], "degraded")
+    def test_send_network_failure_is_uncertain(self):
+        github = channel.GitHubClient("secret")
+        github.opener.open = mock.Mock(side_effect=urllib.error.URLError("timeout"))
+        with self.assertRaises(channel.UncertainDeliveryError):
+            github.call("POST", "/repos/a/b/issues/1/comments", body={"body": "done"})
     def test_stale_recovery_copy_is_not_sent_or_acked_twice(self):
         termite = FakeTermite(); termite.queued = {"r1"}; github = FakeGitHub()
         connector = channel.GitHubConnector(termite, github, ["a/b"], "", 30, 10)
         reply = {"id": "r1", "conversationID": "a/b", "replyToID": "1", "body": "done"}
         connector.deliver(reply); connector.deliver(reply)
         self.assertEqual(len(github.sends), 1)
+        self.assertEqual(termite.attempts, ["r1"])
         self.assertEqual(termite.acks, [("r1", True)])
     def test_marker_is_stable(self):
         self.assertEqual(channel.GitHubClient.marker("r1"), channel.GitHubClient.marker("r1"))

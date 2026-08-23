@@ -66,7 +66,19 @@ Provider credentials never belong in an archive. Packages include a
 `config.example.json`; copy it to `config.json` after installation or store
 secrets in the documented macOS Keychain service. Registry metadata states
 whether each connector is `two-way`, `inbound-only`, or `read-only`, plus the
-configuration required before it can connect.
+configuration required before it can connect. First-party entries also publish
+a bounded v1 `configuration.fields` contract. Termite uses it for guided setup:
+non-secret values go to the installed connector's `config.json`, while every
+`secret` field names the macOS Keychain service that consumes it. Secret values
+must never be written to registry metadata, example files, or archives.
+
+The controlled integration suite launches the real connector modules against
+loopback Termite and provider probes; it never needs provider credentials or
+contacts external services:
+
+```sh
+python3 tools/test-channel-integrations.py
+```
 
 ### First-party catalog
 

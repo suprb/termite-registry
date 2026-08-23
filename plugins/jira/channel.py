@@ -27,9 +27,14 @@ PROJECT_KEY = re.compile(r"^[A-Z][A-Z0-9_]{1,63}$")
 ISSUE_KEY = re.compile(r"^([A-Z][A-Z0-9_]{1,63})-[1-9][0-9]*$")
 MAX_HTTP_BYTES = 8 * 1024 * 1024
 MAX_SSE_LINE_BYTES = 256 * 1024
+HEALTH_STATUSES = {"healthy", "degraded", "retrying", "offline"}
+HEALTH_FIELD_BYTES = {"lastSuccessAt": 128, "lastErrorAt": 128, "error": 1024,
+                      "nextRetryAt": 128, "detail": 2048}
 
 
 class ConnectorError(RuntimeError): pass
+class UncertainDeliveryError(ConnectorError): pass
+def iso_now(): return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 class RejectRedirects(urllib.request.HTTPRedirectHandler):
@@ -44,6 +49,9 @@ def read_json(response, source):
     if len(payload) > MAX_HTTP_BYTES: raise ConnectorError(f"{source} response exceeded {MAX_HTTP_BYTES} bytes")
     try: return json.loads(payload) if payload else {}
     except json.JSONDecodeError as exc: raise ConnectorError(f"{source} returned invalid JSON") from exc
+
+
+def utf8_prefix(value, max_bytes): return str(value).encode("utf-8")[:max_bytes].decode("utf-8", "ignore")
 
 
 def truncate(text, limit=60000):
@@ -135,8 +143,19 @@ class TermiteClient:
     def ingest(self, item): return self.request(f"/v1/channels/{CHANNEL_ID}/work-items", item)
     def acknowledge(self, reply_id, delivered, error=None):
         body = {"delivered": delivered}
-        if error: body["error"] = str(error)[:500]
+        if error: body["error"] = utf8_prefix(error, 1024)
         return self.request(f"/v1/channel-replies/{reply_id}/ack", body)
+    def begin_reply_attempt(self, reply_id): return self.request(f"/v1/channel-replies/{reply_id}/attempt", {})
+    def verification_needed(self, reply_id, error):
+        return self.request(f"/v1/channel-replies/{reply_id}/ack", {
+            "state": "verification-needed", "error": utf8_prefix(error, 1024)})
+    def report_health(self, status, **fields):
+        if status not in HEALTH_STATUSES: raise ConnectorError(f"invalid provider health status: {status}")
+        unknown = set(fields) - set(HEALTH_FIELD_BYTES)
+        if unknown: raise ConnectorError(f"invalid provider health field: {sorted(unknown)[0]}")
+        body = {"status": status}; body.update({key: utf8_prefix(value, HEALTH_FIELD_BYTES[key])
+                                                for key, value in fields.items() if value is not None})
+        return self.request(f"/v1/channels/{CHANNEL_ID}/health", body)
     def pending_replies(self): return self.request("/v1/channel-replies").get("replies", [])
     def reply_is_queued(self, reply_id):
         return any(str(reply.get("id", "")) == reply_id for reply in self.pending_replies())
@@ -170,7 +189,9 @@ class JiraClient:
             detail = "permission or rate limit" if exc.code in {403, 429} else "provider rejected request"
             raise ConnectorError(f"Jira HTTP {exc.code} ({detail})") from exc
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-            raise ConnectorError(f"Jira request failed: {type(exc).__name__}") from exc
+            error = f"Jira request failed: {type(exc).__name__}"
+            if method == "POST" and path.endswith("/comment"): raise UncertainDeliveryError(error) from exc
+            raise ConnectorError(error) from exc
     def identity(self):
         user = self.call("GET", "/rest/api/3/myself")
         return str(user.get("accountId", "")), user.get("displayName") or user.get("emailAddress") or "Jira user"
@@ -223,9 +244,15 @@ class JiraConnector:
         self.since = datetime.now(timezone.utc) - timedelta(seconds=lookback)
         self.own_account_id = ""
         self._delivering, self._lock = set(), threading.Lock()
+    def _health(self, status, **fields):
+        try: self.termite.report_health(status, **fields)
+        except Exception as exc: print(f"Jira health report failed: {exc}", file=sys.stderr)
     def poll_once(self):
         since_jql = self.since.strftime("%Y-%m-%d %H:%M")
-        issues = self.jira.issues(sorted(self.projects), since_jql)
+        try: issues = self.jira.issues(sorted(self.projects), since_jql)
+        except Exception as exc:
+            self._health("retrying", error=str(exc), lastErrorAt=iso_now(), detail="Jira provider poll failed")
+            raise
         for issue in issues:
             issue_id, key = str(issue.get("id", "")), str(issue.get("key", ""))
             match = ISSUE_KEY.fullmatch(key)
@@ -239,7 +266,11 @@ class JiraConnector:
                 "createdAt": fields.get("created")}
             if self.hints.get(match.group(1)): item["projectHint"] = truncate(self.hints[match.group(1)], 1024)
             self.termite.ingest(item)
-            for comment in self.jira.recent_comments(key, self.since):
+            try: comments = self.jira.recent_comments(key, self.since)
+            except Exception as exc:
+                self._health("retrying", error=str(exc), lastErrorAt=iso_now(), detail="Jira provider poll failed")
+                raise
+            for comment in comments:
                 comment_id = str(comment.get("id", "")); author = comment.get("author") or {}
                 if (not comment_id or str(author.get("accountId", "")) == self.own_account_id
                         or str(author.get("accountType", "")).casefold() == "app"):
@@ -254,6 +285,7 @@ class JiraConnector:
                 if self.hints.get(match.group(1)): comment_item["projectHint"] = truncate(self.hints[match.group(1)], 1024)
                 self.termite.ingest(comment_item)
         self.since = datetime.now(timezone.utc) - timedelta(minutes=5)
+        self._health("healthy", lastSuccessAt=iso_now(), detail="Jira poll completed")
     def deliver(self, reply):
         reply_id, issue_key = str(reply.get("id", "")), str(reply.get("conversationID", ""))
         if not reply_id: return
@@ -268,9 +300,18 @@ class JiraConnector:
             match = ISSUE_KEY.fullmatch(issue_key)
             if not match or match.group(1) not in self.projects:
                 self.termite.acknowledge(reply_id, False, "Jira issue is outside this connector's project allowlist"); return
+            try: self.termite.begin_reply_attempt(reply_id)
+            except Exception: return
             try: self.jira.send_comment(issue_key, reply["body"])
-            except Exception as exc: self.termite.acknowledge(reply_id, False, str(exc))
-            else: self.termite.acknowledge(reply_id, True)
+            except UncertainDeliveryError as exc:
+                self._health("degraded", error=str(exc), lastErrorAt=iso_now(), detail="Jira delivery needs verification")
+                self.termite.verification_needed(reply_id, str(exc))
+            except Exception as exc:
+                self._health("degraded", error=str(exc), lastErrorAt=iso_now(), detail="Jira delivery failed")
+                self.termite.acknowledge(reply_id, False, str(exc))
+            else:
+                self._health("healthy", lastSuccessAt=iso_now(), detail="Jira delivery completed")
+                self.termite.acknowledge(reply_id, True)
         finally:
             with self._lock: self._delivering.discard(reply_id)
     def listen(self):
@@ -284,8 +325,12 @@ class JiraConnector:
                 print(f"Termite event stream disconnected: {exc}; retrying", file=sys.stderr)
                 time.sleep(delay); delay = min(delay * 2, 30)
     def run(self):
-        self.own_account_id, detected = self.jira.identity()
+        try: self.own_account_id, detected = self.jira.identity()
+        except Exception as exc:
+            self._health("offline", error=str(exc), lastErrorAt=iso_now(), detail="Jira identity failed")
+            raise
         registration = self.termite.register(self.account or detected)
+        self._health("healthy", lastSuccessAt=iso_now(), detail="Jira identity verified")
         for reply in registration.get("pendingReplies", []): self.deliver(reply)
         threading.Thread(target=self.listen, name="termite-events", daemon=True).start()
         delay = 1
