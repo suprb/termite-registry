@@ -1,5 +1,12 @@
 # termite-registry
 
+> Compatibility registry: current cmdy releases use
+> [`suprb/cmdy-registry`](https://github.com/suprb/cmdy-registry). This legacy
+> endpoint remains online so cmdy 1.0.0 installations built before the public
+> repository migration can resolve the current reviewed Extension and Channel
+> archives. Browser is distributed only inside cmdy's signed Browser-edition
+> app bundle; the retired standalone Chromium archive is intentionally absent.
+
 The index behind the termite marketplace: shaders, themes, rigs, Channel
 connectors, and Extensions, browsable and installable from inside the terminal
 (`Browse the Marketplace…` in the palette, or `termite marketplace install <id>`).
